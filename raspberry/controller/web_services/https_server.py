@@ -1,0 +1,593 @@
+import argparse
+import http.server
+import ssl
+import os
+import json
+import urllib.request
+import urllib.error
+from urllib.parse import urlparse, parse_qs
+from functools import partial
+
+from controller.web_services.vr_config_defaults import get_vr_config_defaults, merge_vr_config_with_defaults
+from controller.web_services import runtime_config_paths as rcfg
+
+# Root static: web/ (vr/, dashboard/, shared/)
+_WEB_SERVICES_DIR = os.path.dirname(os.path.abspath(__file__))
+_CONTROLLER_DIR = os.path.dirname(_WEB_SERVICES_DIR)
+# Default: raspberry5/web (sibling of controller/)
+_DEFAULT_STATIC_ROOT = os.path.join(os.path.dirname(_CONTROLLER_DIR), "web")
+# TLS: prefer config_runtime/tls, fallback legacy controller/certs during migration.
+
+# Path legacy -> path nuovo (compatibilità vecchi bookmark / link)
+_LEGACY_VR_PATHS = {
+    "/viewer_stereo_xr.html": "/vr/viewer_stereo_xr.html",
+    "/viewer_webrtc.html": "/vr/viewer_stereo_xr.html",
+}
+
+
+def _portal_https_base() -> str:
+    return os.environ.get("CAPTIVE_PORTAL_PUBLIC_HTTPS", "https://10.42.0.1").rstrip("/")
+
+
+def _portal_open_url() -> str:
+    return f"{_portal_https_base()}/captive-portal/open"
+
+
+def _portal_viewer_url() -> str:
+    return os.environ.get(
+        "CAPTIVE_PORTAL_TARGET_HTTPS",
+        f"{_portal_https_base()}/vr/viewer_stereo_xr.html",
+    )
+
+
+def _resolve_tls_pair() -> tuple[str, str, str, str]:
+    requested_cert = os.path.abspath(
+        os.environ.get("HTTPS_CERT_FILE", rcfg.get_runtime_config_path("tls_cert"))
+    )
+    requested_key = os.path.abspath(
+        os.environ.get("HTTPS_KEY_FILE", rcfg.get_runtime_config_path("tls_key"))
+    )
+    resolved_cert = rcfg.resolve_existing_config_path("tls_cert", env_var="HTTPS_CERT_FILE")
+    resolved_key = rcfg.resolve_existing_config_path("tls_key", env_var="HTTPS_KEY_FILE")
+    return requested_cert, requested_key, resolved_cert, resolved_key
+
+
+class J5HTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
+    """Handler che risponde anche ai path legacy (senza /vr/) e alle API /api/."""
+
+    def translate_path(self, path):
+        path_clean = path.split("?")[0].split("#")[0].rstrip("/") or "/"
+        if path_clean in _LEGACY_VR_PATHS:
+            path = _LEGACY_VR_PATHS[path_clean] + (
+                "?" + path.split("?", 1)[1] if "?" in path else ""
+            )
+        return super().translate_path(path)
+
+    def _handle_ws_proxy(self):
+        """Proxy a WebSocket upgrade request from the browser to the local WS server (127.0.0.1:8557).
+
+        This allows the browser to connect via wss://<host>/ws using the same TLS certificate and
+        origin it already trusts for HTTPS — no separate cert acceptance needed for port 8557.
+        """
+        import base64 as _b64
+        import hashlib as _hashlib
+        import socket as _socket
+        import ssl as _ssl
+        import threading as _threading
+
+        self.close_connection = True
+
+        ws_key = self.headers.get("Sec-WebSocket-Key", "")
+        if not ws_key:
+            self.send_error(400, "Missing Sec-WebSocket-Key")
+            return
+        ws_accept = _b64.b64encode(
+            _hashlib.sha1(
+                (ws_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+            ).digest()
+        ).decode("ascii")
+        # WebSocket upgrade requires an HTTP/1.1 101 response. BaseHTTPRequestHandler
+        # defaults to HTTP/1.0, which some clients reject during the handshake.
+        self.connection.sendall(
+            (
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Accept: {ws_accept}\r\n"
+                "\r\n"
+            ).encode("ascii")
+        )
+
+        # Connect to local WSS server (skip cert verification — loopback only)
+        ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        try:
+            raw = _socket.create_connection(("127.0.0.1", 8557), timeout=5)
+            remote = ctx.wrap_socket(raw, server_hostname="127.0.0.1")
+        except Exception as e:
+            self.log_message("ws_proxy: cannot connect to local WS server: %s", str(e))
+            return
+
+        # Perform WebSocket upgrade handshake with local server
+        nonce = _b64.b64encode(b"J5WsProxyKey0000").decode("ascii")  # 16 bytes
+        try:
+            remote.sendall((
+                "GET / HTTP/1.1\r\nHost: 127.0.0.1:8557\r\n"
+                "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {nonce}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            ).encode("ascii"))
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                chunk = remote.recv(4096)
+                if not chunk:
+                    remote.close()
+                    return
+                buf += chunk
+        except Exception as e:
+            self.log_message("ws_proxy: upstream handshake error: %s", str(e))
+            try:
+                remote.close()
+            except Exception:
+                pass
+            return
+
+        # Bidirectional raw byte relay (WebSocket frames)
+        browser = self.connection
+
+        def _pipe(src, dst):
+            try:
+                while True:
+                    data = src.recv(65536)
+                    if not data:
+                        break
+                    dst.sendall(data)
+            except Exception:
+                pass
+            finally:
+                try:
+                    src.shutdown(_socket.SHUT_RD)
+                except Exception:
+                    pass
+
+        t = _threading.Thread(target=_pipe, args=(remote, browser), daemon=True)
+        t.start()
+        _pipe(browser, remote)
+        t.join(timeout=5)
+        try:
+            remote.close()
+        except Exception:
+            pass
+
+    def do_GET(self):
+        path_clean = self.path.split("?")[0].split("#")[0]
+        # WebSocket proxy: browser connects to wss://<host>/ws (same cert/origin as HTTPS page)
+        if path_clean == "/ws" and self.headers.get("Upgrade", "").lower() == "websocket":
+            self._handle_ws_proxy()
+            return
+        if path_clean == "/api/routing-config":
+            self._handle_get_routing_config()
+            return
+        if path_clean == "/api/webrtc-calibration":
+            self._handle_get_webrtc_calibration()
+            return
+        if path_clean == "/api/vr-config-defaults":
+            self._handle_get_vr_config_defaults()
+            return
+        if path_clean == "/api/video-config":
+            self._handle_get_video_config()
+            return
+        super().do_GET()
+
+    def do_POST(self):
+        path_clean = self.path.split("?")[0].split("#")[0]
+        if path_clean == "/api/routing-config":
+            self._handle_post_routing_config()
+            return
+        if path_clean == "/api/webrtc-whep":
+            self._handle_webrtc_whep_proxy()
+            return
+        self.send_error(404, "Not found")
+
+    def _handle_get_routing_config(self):
+        """Restituisce la configurazione routing salvata, o 404 se non esiste."""
+        try:
+            cfg = rcfg.load_routing_config_strict()
+            body = json.dumps(cfg).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as e:
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+
+    def _handle_get_vr_config_defaults(self):
+        """Restituisce i default autorevoli backend per routing/tuning VR-IMU."""
+        body = json.dumps(get_vr_config_defaults()).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_get_captive_portal_api(self):
+        """
+        Android Captive Portal API (RFC 8908 / Android 11+).
+        Best-effort: se il client non accetta il certificato locale, ricadrà
+        comunque sui probe HTTP legacy che intercettiamo sul server captive HTTP.
+        """
+        ip = self.client_address[0] if self.client_address else "0.0.0.0"
+        payload = (
+            {"captive": False}
+            if captive_portal_auth.is_authenticated(ip)
+            else {
+                "captive": True,
+                "user-portal-url": _portal_open_url(),
+            }
+        )
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/captive+json")
+        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_get_captive_portal_touch(self):
+        ip = self.client_address[0] if self.client_address else "0.0.0.0"
+        captive_portal_auth.mark_authenticated(ip)
+        self.send_response(204)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+    def _handle_get_captive_portal_open(self):
+        target_url = _portal_viewer_url()
+        html = f"""<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>JONNY5 Portal</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #08131b;
+      --panel: #102537;
+      --ink: #edf6ff;
+      --muted: #a9c4dd;
+      --accent: #41a4ff;
+      --ok: #39c56f;
+    }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at top, rgba(65,164,255,.24), transparent 34%),
+        linear-gradient(180deg, #071019 0%, var(--bg) 100%);
+      color: var(--ink);
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }}
+    .card {{
+      width: min(92vw, 560px);
+      padding: 28px;
+      border-radius: 24px;
+      background: rgba(16,37,55,.94);
+      border: 1px solid rgba(132,176,214,.22);
+      box-shadow: 0 18px 60px rgba(0,0,0,.35);
+    }}
+    h1 {{
+      margin: 0 0 12px;
+      font-size: 2rem;
+    }}
+    p {{
+      margin: 0 0 16px;
+      line-height: 1.5;
+      color: var(--muted);
+    }}
+    .actions {{
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 20px;
+    }}
+    a {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 52px;
+      padding: 0 18px;
+      border-radius: 14px;
+      text-decoration: none;
+      font-weight: 700;
+    }}
+    .primary {{
+      background: var(--accent);
+      color: white;
+    }}
+    .secondary {{
+      border: 1px solid rgba(132,176,214,.28);
+      color: var(--ink);
+    }}
+    .note {{
+      margin-top: 18px;
+      color: #8fe2ad;
+      font-size: .95rem;
+    }}
+    .status {{
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: .95rem;
+    }}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>JONNY5 VR</h1>
+    <p>Hotspot robot connesso. Questa pagina prepara l'apertura del viewer VR in modo piu tollerante per il browser captive del Quest.</p>
+    <p>Se compare un avviso certificato locale, conferma e prosegui verso il viewer.</p>
+    <div class="actions">
+      <a id="open-viewer" class="primary" href="{target_url}" target="_blank" rel="noopener">Apri Teleoperazione VR</a>
+      <a class="secondary" href="{_portal_https_base()}/dashboard/index.html" target="_blank" rel="noopener">Apri Dashboard</a>
+    </div>
+    <div id="portal-status" class="status">Controllo accesso locale in corso...</div>
+    <div class="note">Questa pagina resta intenzionalmente leggera: quando lo stato diventa verde, tocca il pulsante blu per aprire il viewer completo.</div>
+    <div class="note">URL locale viewer: {target_url}</div>
+  </main>
+  <script>
+    (function () {{
+      const target = {target_url!r};
+      const statusEl = document.getElementById('portal-status');
+      const openViewerBtn = document.getElementById('open-viewer');
+      async function touch() {{
+        try {{
+          await fetch('/captive-portal/touch', {{ cache: 'no-store', credentials: 'same-origin' }});
+        }} catch (_) {{}}
+      }}
+      async function bootstrap() {{
+        await touch();
+        try {{
+          const res = await fetch('/api/video-config', {{ cache: 'no-store', credentials: 'same-origin' }});
+          if (!res.ok) throw new Error('video-config HTTP ' + res.status);
+          statusEl.textContent = 'Viewer locale raggiungibile. Tocca "Apri Teleoperazione VR".';
+          statusEl.style.color = '#8fe2ad';
+        }} catch (e) {{
+          statusEl.textContent = 'Viewer locale raggiungibile in modo parziale. Puoi comunque provare ad aprirlo dal pulsante blu.';
+          statusEl.style.color = '#f7d26a';
+        }}
+      }}
+      setTimeout(bootstrap, 250);
+      setInterval(touch, 2000);
+      openViewerBtn.addEventListener('click', function () {{
+        statusEl.textContent = 'Apertura manuale del viewer...';
+        statusEl.style.color = '#8fe2ad';
+      }});
+      document.addEventListener('visibilitychange', function () {{
+        if (document.visibilityState === 'visible') {{
+          touch();
+        }}
+      }});
+    }})();
+  </script>
+</body>
+</html>
+"""
+        body = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_get_webrtc_calibration(self):
+        """Restituisce la calibrazione WebRTC dal path runtime ufficiale."""
+        calib_path = rcfg.get_runtime_config_path("webrtc_calibration")
+        if not os.path.exists(calib_path):
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(b'{"error":"no webrtc calibration"}')
+            return
+        try:
+            with open(calib_path, "r", encoding="utf-8") as f:
+                data = f.read()
+            body = data.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as e:
+            self.send_error(500, str(e))
+
+    def _handle_get_video_config(self):
+        """Restituisce la configurazione video (solo pipeline low-latency: MediaMTX + WHEP)."""
+        runtime_path = rcfg.get_runtime_config_path("video_pipeline")
+        if not os.path.exists(runtime_path):
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": f"missing required runtime config: {runtime_path}"}).encode("utf-8"))
+            return
+
+        cfg = rcfg.load_runtime_yaml("video_pipeline", default=None)
+        if not isinstance(cfg, dict):
+            body = json.dumps(
+                {
+                    "error": "invalid or unreadable video_pipeline.yaml",
+                    "video_pipeline": None,
+                }
+            ).encode("utf-8")
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        val = str(cfg.get("video_pipeline", "")).strip().lower()
+        if val == "webrtc":
+            out = {"video_pipeline": "webrtc"}
+            body = json.dumps(out).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if val == "mjpeg":
+            msg = "MJPEG pipeline is disabled on this server; use MediaMTX + WHEP (video_pipeline: webrtc)."
+        else:
+            msg = f"unsupported video_pipeline value: {val!r}; expected webrtc."
+        body = json.dumps({"error": msg, "video_pipeline": None}).encode("utf-8")
+        self.send_response(503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_webrtc_whep_proxy(self):
+        """Proxy WHEP POST to MediaMTX (127.0.0.1:8889) per evitare mixed content nel viewer VR."""
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        path = (qs.get("path") or [None])[0]
+        if path not in ("cam0", "cam1"):
+            self.send_response(400)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Missing or invalid query: path=cam0 or path=cam1")
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        if length <= 0:
+            self.send_response(400)
+            self.end_headers()
+            return
+        body = self.rfile.read(length)
+        mediamtx_url = f"http://127.0.0.1:8889/{path}/whep"
+        req = urllib.request.Request(
+            mediamtx_url,
+            data=body,
+            method="POST",
+            headers={"Content-Type": self.headers.get("Content-Type", "application/sdp")},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status = resp.getcode()
+                answer = resp.read()
+                self.send_response(status)
+                self.send_header("Content-Type", resp.headers.get("Content-Type", "application/sdp"))
+                self.send_header("Content-Length", str(len(answer)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(answer)
+        except urllib.error.HTTPError as e:
+            self.send_response(e.code)
+            self.send_header("Content-Type", "text/plain")
+            try:
+                body_err = e.read()
+            except Exception:
+                body_err = str(e).encode("utf-8")
+            self.send_header("Content-Length", str(len(body_err)))
+            self.end_headers()
+            self.wfile.write(body_err)
+        except Exception as e:
+            self.send_response(502)
+            self.send_header("Content-Type", "text/plain")
+            msg = str(e).encode("utf-8")
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
+
+    def _handle_post_routing_config(self):
+        """Salva/persist la configurazione routing ricevuta come JSON."""
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length)
+        try:
+            cfg = json.loads(raw.decode("utf-8"))
+            # Leggi file esistente (se c'è) e fai merge: così un salvataggio parziale
+            # (solo limits o solo tuning) non cancella routing già salvato e viceversa.
+            existing = rcfg.load_routing_config_strict() or {}
+            merged = merge_vr_config_with_defaults({**existing, **cfg})
+            rcfg.validate_routing_config_shape(merged)
+            if not rcfg.save_runtime_json("routing_config", merged, mirror_legacy=False):
+                raise RuntimeError("unable to persist routing_config")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+        except Exception as e:
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": str(e)}).encode())
+
+    def do_OPTIONS(self):
+        """CORS preflight."""
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def log_message(self, fmt, *args):
+        # Silenzia log HTTP per richieste API frequenti
+        first_arg = args[0] if args else ""
+        first_arg = first_arg if isinstance(first_arg, str) else str(first_arg)
+        if "/api/" not in first_arg:
+            super().log_message(fmt, *args)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="JONNY5 HTTPS server")
+    parser.add_argument("--root", type=str, default=None, help="Root directory for static files (e.g. .../web)")
+    args = parser.parse_args()
+
+    host = os.environ.get("HTTPS_BIND", "0.0.0.0")
+    port = int(os.environ.get("HTTPS_PORT", "8443"))
+    directory = os.environ.get("HTTPS_DIR") or args.root or _DEFAULT_STATIC_ROOT
+    directory = os.path.abspath(directory)
+    requested_cert, requested_key, cert_file, key_file = _resolve_tls_pair()
+
+    handler = partial(J5HTTPRequestHandler, directory=directory)
+    httpd = http.server.ThreadingHTTPServer((host, port), handler)
+
+    if not os.path.isfile(cert_file) or not os.path.isfile(key_file):
+        raise SystemExit(
+            "TLS files not found. Provision config_runtime/tls/webrtc.crt and "
+            "config_runtime/tls/webrtc.key, or set HTTPS_CERT_FILE/HTTPS_KEY_FILE."
+        )
+    if cert_file != requested_cert or key_file != requested_key:
+        print(
+            f"TLS fallback active: requested=({requested_cert}, {requested_key}) "
+            f"resolved=({cert_file}, {key_file})"
+        )
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
+    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+
+    print(f"HTTPS server on https://{host}:{port} (dir={directory}, cert={cert_file})")
+    httpd.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
