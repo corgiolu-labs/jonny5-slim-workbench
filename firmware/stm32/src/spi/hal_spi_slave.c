@@ -60,7 +60,13 @@
 #define SPI_BUF_LEN            (SPI_FRAME_LEN * SPI_FRAMES_IN_CIRCULAR)
 
 #define SPI_SERVICE_STACK_SIZE 1024
-#define SPI_SERVICE_PRIO       6   /* sotto RT(5), sopra IMU(7): servizio SPI non preempra il controllo RT */
+/* Priorita' complessiva: RT(5) > IMU(6) > SPI service(7).
+ * Con la versione precedente (SPI service=6 > IMU=7) le wake-up del DMA SPI
+ * preempravano il thread IMU durante il path I2C1/MPU6050, producendo in campo
+ * wedge ricorrenti del bus (SDA held low) con probabilita' dipendente dal rate
+ * SPI. Ora IMU non e' piu' preempribile da spi_service; SPI service resta
+ * preempribile dal loop RT (5), preservando la disciplina RT originaria. */
+#define SPI_SERVICE_PRIO       7
 
 /** Se 1 il DMA circular rimane sempre armato (no polling NSS). */
 #define SPI_DMA_ALWAYS_ARMED   1

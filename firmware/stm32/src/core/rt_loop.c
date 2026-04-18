@@ -46,8 +46,12 @@ K_THREAD_STACK_DEFINE(rt_thread_stack, 4096);
 #define RT_LOOP_PERIOD_US 1000
 
 /* Thread IMU dedicato 400 Hz (fuori dal RT loop; prioritÃƒÆ’Ã‚Â  < system workqueue 5) */
+/* Priorita' scheduling: RT(5) > IMU(6) > SPI service(7).
+ * IMU e' unico consumatore del bus I2C1 (MPU6050); tenerlo sopra spi_service
+ * evita che le wake-up del DMA SPI lo preemprano durante il path I2C e il
+ * rischio di wedge del bus (SDA trattenuto basso) osservato in campo. */
 #define IMU_THREAD_STACK_SZ 8192
-#define IMU_THREAD_PRIO 7
+#define IMU_THREAD_PRIO 6
 #define IMU_PERIOD_US 2500
 #define IMU_DT_S 0.0025f
 

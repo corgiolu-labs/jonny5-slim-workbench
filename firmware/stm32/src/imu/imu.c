@@ -160,12 +160,29 @@ void imu_i2c_bus_recovery(void)
 	gpio_pin_set(gpio_b, 8, 1);
 	k_usleep(10);
 
-	/* Verifica SDA */
+	/* Verifica SDA dopo i 9 clock */
 	int sda = gpio_pin_get(gpio_b, 9);
 	if (sda == 0)
 	{
 		LOG_ERR("[IMU] I2C bus still locked after recovery");
 	}
+
+	/* Sequenza START+STOP manuale per resettare lo state-machine del
+	 * device I2C (NXP/ST AN4509). I soli 9 clock non bastano se lo slave
+	 * sta ancora "aspettando il prossimo byte": serve una transizione
+	 * START (SDA 1->0 con SCL=1) seguita da STOP (SDA 0->1 con SCL=1) per
+	 * riportare entrambi i lati in idle. */
+	gpio_pin_set(gpio_b, 9, 1);
+	gpio_pin_set(gpio_b, 8, 1);
+	k_usleep(10);
+	gpio_pin_set(gpio_b, 9, 0);      /* START: SDA 1->0 mentre SCL=1 */
+	k_usleep(10);
+	gpio_pin_set(gpio_b, 8, 0);      /* abbassa SCL dopo START */
+	k_usleep(10);
+	gpio_pin_set(gpio_b, 8, 1);      /* risale SCL con SDA basso */
+	k_usleep(10);
+	gpio_pin_set(gpio_b, 9, 1);      /* STOP: SDA 0->1 mentre SCL=1 */
+	k_usleep(10);
 
 	/* Ripristina pinctrl I2C1 default */
 	(void)pinctrl_apply_state(PINCTRL_DT_DEV_CONFIG_GET(DT_NODELABEL(i2c1)), PINCTRL_STATE_DEFAULT);
