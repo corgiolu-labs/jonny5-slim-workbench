@@ -28,6 +28,14 @@ logger = logging.getLogger(__name__)
 # Throttle log SPI-RX TELEMETRY: loggare solo 1 ogni LOG_EVERY_N frame (evita spam a 100 Hz)
 LOG_EVERY_N = 20
 
+# Finestra di grazia per "heartbeat" telemetria: quando il firmware risponde con un
+# frame J5 valido ma non-TELEMETRY (es. STATUS 0x03) entro TELEMETRY_GRACE_S secondi
+# dall'ultimo 0x01, rigeneriamo il file telemetria con gli ultimi valori IMU noti in
+# modo che shared_state.is_telemetry_fresh() non flippi a False per brevi buchi dello
+# slave SPI. Previene IMU pill flicker osservato in campo senza mascherare guasti reali
+# (oltre la finestra il file torna correttamente stale).
+TELEMETRY_GRACE_S = 0.5
+
 
 def _clamp_deg_int(x: Any) -> Optional[int]:
     try:
@@ -79,6 +87,11 @@ class J5VRSPIBridge:
         self._rx_diag_prev = None
         self._imu_prev_sample_counter = None
         self._imu_prev_sample_t = None
+        # Cache telemetria: usata per mtime-heartbeat in grace window e per preservare
+        # imu_valid quando arriva lo stesso sample IMU (payload[28] transitorio).
+        self._last_telemetry_out: Optional[dict] = None
+        self._last_telemetry_wall_t: Optional[float] = None
+        self._last_imu_valid: Optional[bool] = None
 
         # Allineamento: se esiste già un feedback file con id, continuiamo da lì.
         try:
@@ -300,7 +313,8 @@ class J5VRSPIBridge:
                             ack = True
                     # TELEMETRY (0x01): estrai imu_valid, quaternione e angoli servo (gradi) per debug UI
                     if frame_type_rx == J5_FRAME_TYPE_TELEMETRY and len(payload) >= 51:
-                        imu_valid = bool(payload[28] != 0)
+                        imu_valid_raw = bool(payload[28] != 0)
+                        imu_valid = imu_valid_raw
                         try:
                             imu_accel_x = struct.unpack_from(">f", payload, 0)[0]
                             imu_accel_y = struct.unpack_from(">f", payload, 4)[0]
@@ -347,8 +361,15 @@ class J5VRSPIBridge:
                             imu_repeated = (imu_sample_delta == 0)
                             if imu_sample_delta > 1:
                                 imu_jump = int(imu_sample_delta - 1)
+                        # Se e' lo STESSO sample IMU (counter invariato) e in precedenza
+                        # lo avevamo gia' validato, conserva imu_valid=True. Evita flicker
+                        # dovuto a race sul DMA slave che azzera transitoriamente payload[28]
+                        # mentre il sample sottostante non e' cambiato.
+                        if imu_repeated and self._last_imu_valid is True and not imu_valid_raw:
+                            imu_valid = True
                         self._imu_prev_sample_counter = imu_sample_counter
                         self._imu_prev_sample_t = now_mono
+                        self._last_imu_valid = imu_valid
                         if self._frame_count % LOG_EVERY_N == 0:
                             logger.info(
                                 "[SPI-RX TELEMETRY] imu_valid=%s raw_byte=%d sample=%d d_sample=%s rate=%.1fHz rep=%s jump=%d | "
@@ -406,6 +427,27 @@ class J5VRSPIBridge:
                             if imu_temp is not None:
                                 out["imu_temp"] = imu_temp
                             telemetry_writer(out)
+                            # Aggiorna cache per mtime-heartbeat in grace window.
+                            self._last_telemetry_out = out
+                            self._last_telemetry_wall_t = time.monotonic()
+                    elif (
+                        frame_type_rx != J5_FRAME_TYPE_TELEMETRY
+                        and self._last_telemetry_out is not None
+                        and self._last_telemetry_wall_t is not None
+                        and (time.monotonic() - self._last_telemetry_wall_t) <= TELEMETRY_GRACE_S
+                    ):
+                        # Frame J5 valido ma non-TELEMETRY (es. STATUS 0x03): rigenera il
+                        # file telemetria con gli ultimi valori per mantenere fresco il
+                        # mtime (is_telemetry_fresh) ed evitare IMU pill flicker su brevi
+                        # buchi dello slave. Non flippa imu_valid e marca l'evento come
+                        # heartbeat per eventuale diagnostica downstream.
+                        telemetry_writer_hb = getattr(self.state_provider, "write_telemetry_to_file", None)
+                        if callable(telemetry_writer_hb):
+                            hb = dict(self._last_telemetry_out)
+                            hb["packet_index"] = self._frame_count
+                            hb["telemetry_heartbeat"] = True
+                            hb["heartbeat_rx_frame_type"] = int(frame_type_rx)
+                            telemetry_writer_hb(hb)
                 if ack and not self._teleoppose_ack_prev:
                     self._teleoppose_ack_id = (self._teleoppose_ack_id + 1) & 0xFFFFFFFF
                     logger.info("[SPI] TELEOPPOSE ACK from STM32 (id=%d)", self._teleoppose_ack_id)
