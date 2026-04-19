@@ -333,75 +333,614 @@
             line-height: 1.45;
         }
 
+        /* ===== Compare layout (thesis-ready, video friendly) =====
+           Row 1: [Target | Reale]   grid 1x2
+           Row 2: [Errore]           full width
+           Numeri grandi, colori cromatici per sorgente, soglie su Δ.     */
         .ik-page .ik-compare-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 0.9rem;
+        }
+
+        .ik-page .ik-compare-row-top {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 0.9rem;
         }
 
         @media (max-width: 980px) {
-            .ik-page .ik-compare-grid {
-                grid-template-columns: 1fr;
-            }
+            .ik-page .ik-compare-row-top { grid-template-columns: 1fr; }
         }
 
         .ik-page .ik-compare-card {
             background: rgba(10, 17, 32, 0.52);
             border: 1px solid rgba(61, 157, 255, 0.15);
             border-radius: 12px;
-            padding: 0.95rem 0.95rem 0.8rem 0.95rem;
+            padding: 1.0rem 1.0rem 0.9rem 1.0rem;
         }
 
-        .ik-page .ik-compare-card.target { border-color: rgba(61, 157, 255, 0.28); }
-        .ik-page .ik-compare-card.fk     { border-color: rgba(46, 204, 113, 0.25); }
-        .ik-page .ik-compare-card.imu    { border-color: rgba(176, 127, 217, 0.28); }
-        .ik-page .ik-compare-card.delta  { border-color: rgba(243, 156, 18, 0.28); }
+        /* Sorgenti colorate: target = blu, reale = verde, errore = arancio.
+           Il titolo ha un accento laterale della stessa famiglia. */
+        .ik-page .ik-compare-card.target {
+            border-color: rgba(61, 157, 255, 0.45);
+            box-shadow: inset 4px 0 0 0 rgba(61, 157, 255, 0.7);
+        }
+        .ik-page .ik-compare-card.real {
+            border-color: rgba(46, 204, 113, 0.45);
+            box-shadow: inset 4px 0 0 0 rgba(46, 204, 113, 0.7);
+        }
+        .ik-page .ik-compare-card.error {
+            border-color: rgba(243, 156, 18, 0.45);
+            box-shadow: inset 4px 0 0 0 rgba(243, 156, 18, 0.8);
+        }
 
         .ik-page .ik-compare-card-title {
             display: flex;
             justify-content: space-between;
             align-items: baseline;
             gap: 0.75rem;
-            margin: 0 0 0.7rem 0;
+            margin: 0 0 0.85rem 0;
         }
 
         .ik-page .ik-compare-card-title h3 {
             margin: 0;
-            font-size: 0.88rem;
+            font-size: 1.05rem;
             color: var(--text, #f6f8fb);
-            font-weight: 700;
+            font-weight: 800;
+            letter-spacing: 0.01em;
         }
+        .ik-page .ik-compare-card.target  .ik-compare-card-title h3 { color: #8fcaff; }
+        .ik-page .ik-compare-card.real    .ik-compare-card-title h3 { color: #7fe0a0; }
+        .ik-page .ik-compare-card.error   .ik-compare-card-title h3 { color: #ffc870; }
 
         .ik-page .ik-compare-card-title span {
-            font-size: 0.72rem;
+            font-size: 0.78rem;
             color: var(--muted, #9db1cc);
-            line-height: 1.25;
+            line-height: 1.3;
             text-align: right;
         }
 
         .ik-page .ik-compare-card .ik-num-grid {
             grid-template-columns: repeat(3, 1fr);
+            gap: 0.55rem;
             margin-bottom: 0;
         }
 
         .ik-page .ik-compare-card .ik-value-cell {
-            min-height: 3.1rem;
-            padding: 0.55rem 0.35rem;
+            min-height: 4.0rem;
+            padding: 0.7rem 0.45rem;
+            background: rgba(6, 12, 24, 0.55);
+            border-radius: 8px;
+            text-align: center;
         }
 
         .ik-page .ik-compare-card .cell-label {
-            margin-bottom: 0.2rem;
+            margin-bottom: 0.25rem;
+            font-size: 0.75rem;
+            letter-spacing: 0.02em;
         }
 
+        /* Numeri grandi — leggibili in registrazione video a distanza. */
         .ik-page .ik-compare-card .cell-value {
-            font-size: 0.95rem;
+            font-size: 1.75rem;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            letter-spacing: -0.01em;
         }
+        .ik-page .ik-compare-card.target .cell-value { color: #cfe6ff; }
+        .ik-page .ik-compare-card.real   .cell-value { color: #d6f6e0; }
+
+        /* Errore: colore del NUMERO in base alla soglia (applicato da ik.js
+           via classi error-green / error-yellow / error-red sul <div>). */
+        .ik-page .ik-compare-card.error .cell-value { color: #e7ecf4; }
+        .ik-page .cell-value.error-green  { color: #5be39a; }
+        .ik-page .cell-value.error-yellow { color: #ffc96a; }
+        .ik-page .cell-value.error-red    { color: #ff6b6b; }
+        .ik-page .cell-value.error-idle   { color: #6d7a8f; }
+
+        .ik-page .ik-error-summary {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.75rem 1.4rem;
+            margin-top: 0.9rem;
+            padding: 0.7rem 0.8rem;
+            background: rgba(6, 12, 24, 0.6);
+            border-radius: 8px;
+            font-size: 1.0rem;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            color: #d8dde6;
+        }
+        .ik-page .ik-error-dot {
+            font-size: 1.35rem;
+            line-height: 1;
+        }
+        .ik-page .error-dot-green   { color: #3ecf82; }
+        .ik-page .error-dot-yellow  { color: #ffc857; }
+        .ik-page .error-dot-red     { color: #ff5b5b; }
+        .ik-page .error-dot-idle    { color: #586174; }
 
         .ik-page .ik-compare-note {
-            font-size: 0.76rem;
+            font-size: 0.78rem;
             color: var(--muted, #9db1cc);
             margin-top: 0.75rem;
             line-height: 1.45;
+        }
+
+        /* ==========================================================
+           THESIS-READY LAYOUT — 4 sezioni principali
+           ========================================================== */
+        .ik-page .tesis-section {
+            margin-bottom: 1.1rem;
+            padding: 1.1rem 1.3rem 1.2rem 1.3rem;
+            border-radius: 14px;
+        }
+        .ik-page .tesis-section.target-section {
+            border-left: 5px solid #3d9dff;
+            background: linear-gradient(180deg, rgba(61,157,255,0.08), rgba(10,17,32,0.6));
+        }
+        .ik-page .tesis-section.real-section {
+            border-left: 5px solid #2ecc71;
+            background: linear-gradient(180deg, rgba(46,204,113,0.08), rgba(10,17,32,0.6));
+        }
+        .ik-page .tesis-section.state-section {
+            border-left: 5px solid #9db1cc;
+            background: rgba(10, 17, 32, 0.55);
+        }
+        .ik-page .tesis-section.error-section {
+            border-left: 5px solid #f39c12;
+            background: linear-gradient(180deg, rgba(243,156,18,0.08), rgba(10,17,32,0.65));
+            /* La sezione errore è quella dominante: più padding e bordo marcato. */
+            padding: 1.2rem 1.4rem 1.4rem 1.4rem;
+            box-shadow: 0 0 0 1px rgba(243,156,18,0.22);
+        }
+        .ik-page .tesis-section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 0.9rem;
+            margin-bottom: 0.95rem;
+        }
+        .ik-page .tesis-section-header h2 {
+            margin: 0;
+            font-size: 1.2rem;
+            font-weight: 800;
+            letter-spacing: 0.01em;
+        }
+        .ik-page .target-section .tesis-section-header h2 { color: #8fcaff; }
+        .ik-page .real-section   .tesis-section-header h2 { color: #7fe0a0; }
+        .ik-page .state-section  .tesis-section-header h2 { color: #e7ecf4; }
+        .ik-page .error-section  .tesis-section-header h2 { color: #ffc870; font-size: 1.3rem; }
+        .ik-page .tesis-caption {
+            font-size: 0.82rem;
+            color: var(--muted, #9db1cc);
+        }
+
+        /* Grid a 6 celle (3 cols x 2 rows) per target / real / error.
+           Stessa geometria → allineamento visivo perfetto tra sezioni. */
+        .ik-page .tesis-pose-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0.7rem;
+        }
+        @media (max-width: 720px) {
+            .ik-page .tesis-pose-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+        .ik-page .pose-cell {
+            background: rgba(6, 12, 24, 0.55);
+            border-radius: 10px;
+            padding: 0.8rem 0.6rem 0.85rem 0.6rem;
+            text-align: center;
+            min-height: 4.8rem;
+        }
+        .ik-page .pose-label {
+            font-size: 0.78rem;
+            color: var(--muted, #9db1cc);
+            letter-spacing: 0.04em;
+            margin-bottom: 0.3rem;
+            text-transform: uppercase;
+        }
+        .ik-page .pose-label .unit {
+            color: #6d7a8f;
+            font-weight: 500;
+        }
+        .ik-page .pose-value {
+            font-size: 1.85rem;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            letter-spacing: -0.01em;
+            line-height: 1.1;
+        }
+        .ik-page .target-section .pose-value { color: #cfe6ff; }
+        .ik-page .real-section   .pose-value { color: #d6f6e0; }
+        .ik-page .error-section  .pose-value { color: #e7ecf4; }
+
+        /* Input cells nella sezione Target: grossi, allineati con pose-value.
+           L'input nasconde spinner/accessori così il video resta pulito. */
+        .ik-page .pose-input {
+            width: 100%;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: #cfe6ff;
+            font-size: 1.85rem;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            letter-spacing: -0.01em;
+            text-align: center;
+            line-height: 1.1;
+        }
+        .ik-page .pose-input:focus { color: #ffffff; }
+        .ik-page .pose-input::-webkit-outer-spin-button,
+        .ik-page .pose-input::-webkit-inner-spin-button {
+            -webkit-appearance: none; margin: 0;
+        }
+        .ik-page .pose-input[type=number] { -moz-appearance: textfield; }
+
+        /* Colore del NUMERO errore per cella (gestito via JS: error-green/yellow/red/idle) */
+        .ik-page .error-section .pose-value.error-green  { color: #5be39a; }
+        .ik-page .error-section .pose-value.error-yellow { color: #ffc96a; }
+        .ik-page .error-section .pose-value.error-red    { color: #ff6b6b; }
+        .ik-page .error-section .pose-value.error-idle   { color: #6d7a8f; }
+
+        /* Row primario sotto i campi target: pulsante big + Home compatto */
+        .ik-page .tesis-actions-row {
+            display: flex;
+            gap: 0.8rem;
+            margin-top: 1.0rem;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .ik-page .tesis-btn-primary {
+            font-size: 1.05rem;
+            font-weight: 700;
+            padding: 0.85rem 1.5rem;
+            border-radius: 10px;
+            background: linear-gradient(180deg, #3d9dff, #1f7bd9);
+            color: #0a1120;
+            border: none;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(61,157,255,0.25);
+            letter-spacing: 0.02em;
+        }
+        .ik-page .tesis-btn-primary:hover { filter: brightness(1.08); }
+        .ik-page .tesis-btn-primary:disabled { opacity: 0.55; cursor: not-allowed; }
+        .ik-page .tesis-btn-secondary {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.15);
+            color: #d8dde6;
+            padding: 0.7rem 1.05rem;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 0.95rem;
+            font-weight: 600;
+        }
+        .ik-page .tesis-btn-secondary:hover { background: rgba(255,255,255,0.08); }
+        .ik-page .tesis-status-line {
+            margin-top: 0.65rem;
+            font-size: 0.85rem;
+            color: var(--muted, #9db1cc);
+            min-height: 1.1rem;
+        }
+
+        /* Stato robot — 4 pills affiancate con color-coding per livello. */
+        .ik-page .state-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.7rem;
+        }
+        @media (max-width: 720px) {
+            .ik-page .state-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+        .ik-page .state-pill {
+            background: rgba(6, 12, 24, 0.55);
+            border-radius: 10px;
+            padding: 0.75rem 0.9rem;
+            border: 1px solid rgba(255,255,255,0.07);
+            transition: border-color 0.15s, background 0.15s;
+        }
+        .ik-page .state-label {
+            font-size: 0.72rem;
+            color: var(--muted, #9db1cc);
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            margin-bottom: 0.35rem;
+        }
+        .ik-page .state-value {
+            font-size: 1.15rem;
+            font-weight: 700;
+            letter-spacing: 0.01em;
+            font-variant-numeric: tabular-nums;
+            color: #e7ecf4;
+        }
+        .ik-page .state-level-ok      { border-color: rgba(46,204,113,0.4);  background: rgba(46,204,113,0.10); }
+        .ik-page .state-level-ok      .state-value { color: #7fe0a0; }
+        .ik-page .state-level-wait    { border-color: rgba(255,200,103,0.4); background: rgba(255,200,103,0.08); }
+        .ik-page .state-level-wait    .state-value { color: #ffc857; }
+        .ik-page .state-level-bad     { border-color: rgba(255,91,91,0.45);  background: rgba(255,91,91,0.10); }
+        .ik-page .state-level-bad     .state-value { color: #ff6b6b; }
+        .ik-page .state-level-moving  { border-color: rgba(61,157,255,0.45); background: rgba(61,157,255,0.10); }
+        .ik-page .state-level-moving  .state-value { color: #8fcaff; }
+        .ik-page .state-level-idle    { border-color: rgba(157,177,204,0.2); }
+        .ik-page .state-level-idle    .state-value { color: #9db1cc; }
+
+        .ik-page .state-dot {
+            font-size: 1.0rem;
+            vertical-align: -2px;
+            margin-right: 0.2rem;
+        }
+        .ik-page .state-dot-on  { color: #3ecf82; }
+        .ik-page .state-dot-off { color: #586174; }
+
+        /* Riepilogo nel card errore: pallino + norma pos + norma rot */
+        .ik-page .error-summary-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.75rem 1.8rem;
+            margin-top: 1.0rem;
+            padding: 0.85rem 1.0rem;
+            background: rgba(6, 12, 24, 0.65);
+            border-radius: 10px;
+            font-size: 1.05rem;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            color: #d8dde6;
+        }
+        .ik-page .error-norm { white-space: nowrap; }
+
+        /* Verdetto finale — linea riassuntiva alta visibilità */
+        .ik-page .error-verdict {
+            margin-top: 0.85rem;
+            padding: 0.95rem 1.1rem;
+            border-radius: 10px;
+            display: flex;
+            align-items: baseline;
+            gap: 0.7rem;
+            font-size: 1.0rem;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+            transition: background 0.2s, color 0.2s;
+        }
+        .ik-page .error-verdict .verdict-label {
+            color: var(--muted, #9db1cc);
+            font-weight: 600;
+        }
+        .ik-page .error-verdict .verdict-value {
+            font-size: 1.35rem;
+            font-weight: 800;
+            letter-spacing: 0.04em;
+        }
+        .ik-page .error-verdict.verdict-green  {
+            background: rgba(62,207,130,0.15);
+            border: 1px solid rgba(62,207,130,0.45);
+        }
+        .ik-page .error-verdict.verdict-green  .verdict-value { color: #5be39a; }
+        .ik-page .error-verdict.verdict-yellow {
+            background: rgba(255,200,103,0.15);
+            border: 1px solid rgba(255,200,103,0.45);
+        }
+        .ik-page .error-verdict.verdict-yellow .verdict-value { color: #ffc857; }
+        .ik-page .error-verdict.verdict-red    {
+            background: rgba(255,91,91,0.15);
+            border: 1px solid rgba(255,91,91,0.45);
+        }
+        .ik-page .error-verdict.verdict-red    .verdict-value { color: #ff6b6b; }
+        .ik-page .error-verdict.verdict-idle   {
+            background: rgba(88,97,116,0.12);
+            border: 1px solid rgba(88,97,116,0.3);
+        }
+        .ik-page .error-verdict.verdict-idle   .verdict-value { color: #9db1cc; }
+
+        /* Blocco utilità in fondo pagina: collapsed di default, de-enfatizzato.
+           Mantiene FK manuale, IK angoli-risultato, Save target. */
+        .ik-page .utilities-section {
+            margin-top: 1.6rem;
+            background: rgba(10, 17, 32, 0.45);
+            border: 1px dashed rgba(157,177,204,0.22);
+            border-radius: 10px;
+            padding: 0;
+        }
+        .ik-page .utilities-section > summary {
+            list-style: none;
+            padding: 0.75rem 1.1rem;
+            cursor: pointer;
+            font-size: 0.88rem;
+            color: var(--muted, #9db1cc);
+            letter-spacing: 0.02em;
+            outline: none;
+        }
+        .ik-page .utilities-section > summary::-webkit-details-marker { display: none; }
+        .ik-page .utilities-section > summary::before {
+            content: "▸";
+            display: inline-block;
+            margin-right: 0.4rem;
+            transition: transform 0.2s;
+        }
+        .ik-page .utilities-section[open] > summary::before { transform: rotate(90deg); }
+        .ik-page .utilities-body {
+            padding: 0 1.1rem 1.1rem 1.1rem;
+        }
+
+        /* ==========================================================
+           PIPELINE NARRATIVE — 4 sezioni engineering-flow
+           1) Joints → 2) FK pose → 3) IK recovered joints → 4) Real robot
+           ========================================================== */
+        .ik-page .pipeline-flow-hint {
+            margin: 0.1rem 0 0.9rem 0;
+            padding: 0.7rem 1rem;
+            font-size: 0.95rem;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-align: center;
+            color: #c9d3e0;
+            border: 1px dashed rgba(61,157,255,0.28);
+            border-radius: 10px;
+            background: linear-gradient(90deg,
+                rgba(147,120,220,0.06), rgba(61,157,255,0.06),
+                rgba(46,204,113,0.06), rgba(243,156,18,0.08));
+        }
+
+        /* Accenti colorati per sezione (pipeline chain). */
+        .ik-page .tesis-section.joints-section {
+            border-left: 5px solid #9378dc;
+            background: linear-gradient(180deg, rgba(147,120,220,0.08), rgba(10,17,32,0.6));
+        }
+        .ik-page .joints-section .tesis-section-header h2 { color: #c7b6f5; }
+        .ik-page .joints-section .pose-value,
+        .ik-page .joints-section .pose-input { color: #d6cdfb; }
+
+        .ik-page .tesis-section.fk-section {
+            border-left: 5px solid #3d9dff;
+            background: linear-gradient(180deg, rgba(61,157,255,0.08), rgba(10,17,32,0.6));
+        }
+        .ik-page .fk-section .tesis-section-header h2 { color: #8fcaff; }
+        .ik-page .fk-section .pose-value { color: #cfe6ff; }
+
+        .ik-page .tesis-section.ik-round-section {
+            border-left: 5px solid #c678dd;
+            background: linear-gradient(180deg, rgba(198,120,221,0.09), rgba(10,17,32,0.6));
+        }
+        .ik-page .ik-round-section .tesis-section-header h2 { color: #e6bcf6; }
+        .ik-page .ik-round-section .pose-value { color: #efd5fb; }
+
+        .ik-page .tesis-section.compare-section {
+            border-left: 5px solid #f39c12;
+            background: linear-gradient(180deg, rgba(243,156,18,0.08), rgba(10,17,32,0.6));
+            padding: 1.2rem 1.4rem 1.4rem 1.4rem;
+            box-shadow: 0 0 0 1px rgba(243,156,18,0.22);
+        }
+        .ik-page .compare-section .tesis-section-header h2 { color: #ffc870; font-size: 1.3rem; }
+
+        /* Grid per i 6 angoli giunto (Sez 1 + Sez 3): stessa geometria
+           della pose-grid così Sez 1 e Sez 3 sono confrontabili a colpo d'occhio. */
+        .ik-page .tesis-joint-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0.7rem;
+        }
+        @media (max-width: 720px) {
+            .ik-page .tesis-joint-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+
+        /* Riepilogo round-trip (Sez 3): pallino + max scostamento + solver meta */
+        .ik-page .round-trip-summary {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.75rem 1.8rem;
+            margin-top: 0.9rem;
+            padding: 0.8rem 1.0rem;
+            background: rgba(6, 12, 24, 0.65);
+            border-radius: 10px;
+            font-size: 1.0rem;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            color: #d8dde6;
+        }
+
+        /* State strip compatta — 4 pill in riga tra Sez 3 e Sez 4 */
+        .ik-page .state-strip {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.7rem;
+            margin: 0.4rem 0 1.0rem 0;
+        }
+        @media (max-width: 720px) {
+            .ik-page .state-strip { grid-template-columns: repeat(2, 1fr); }
+        }
+
+        /* Compare section layout: Target|Real affiancate, poi Error full-width */
+        .ik-page .compare-dual-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.9rem;
+            margin-bottom: 1.0rem;
+        }
+        @media (max-width: 980px) {
+            .ik-page .compare-dual-grid { grid-template-columns: 1fr; }
+        }
+        .ik-page .compare-subcard {
+            background: rgba(10, 17, 32, 0.55);
+            border-radius: 10px;
+            padding: 0.95rem 1.0rem 1.0rem 1.0rem;
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+        .ik-page .compare-subcard.target-sub {
+            border-color: rgba(61,157,255,0.35);
+            box-shadow: inset 3px 0 0 0 rgba(61,157,255,0.6);
+        }
+        .ik-page .compare-subcard.real-sub {
+            border-color: rgba(46,204,113,0.35);
+            box-shadow: inset 3px 0 0 0 rgba(46,204,113,0.6);
+        }
+        .ik-page .compare-subcard.error-sub {
+            border-color: rgba(243,156,18,0.4);
+            box-shadow: inset 3px 0 0 0 rgba(243,156,18,0.7);
+        }
+        .ik-page .compare-subcard-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 0.7rem;
+            margin-bottom: 0.7rem;
+        }
+        .ik-page .compare-subcard-header strong {
+            font-size: 1.0rem;
+            font-weight: 700;
+            letter-spacing: 0.01em;
+        }
+        .ik-page .compare-subcard.target-sub .compare-subcard-header strong { color: #8fcaff; }
+        .ik-page .compare-subcard.real-sub   .compare-subcard-header strong { color: #7fe0a0; }
+        .ik-page .compare-subcard.error-sub  .compare-subcard-header strong { color: #ffc870; }
+        .ik-page .compare-subcard.target-sub .pose-input,
+        .ik-page .compare-subcard.target-sub .pose-value { color: #cfe6ff; }
+        .ik-page .compare-subcard.real-sub   .pose-value { color: #d6f6e0; }
+        .ik-page .compare-subcard.error-sub  .pose-value { color: #e7ecf4; }
+
+        /* Zero-at-HOME control bar — piccola, sotto la tesis-actions-row di Sez 3 */
+        .ik-page .zero-home-bar {
+            display: flex; flex-wrap: wrap; align-items: center;
+            gap: 0.7rem; margin-top: 0.7rem;
+            padding: 0.55rem 0.75rem;
+            background: rgba(6, 12, 24, 0.4);
+            border: 1px dashed rgba(157,177,204,0.25);
+            border-radius: 8px;
+        }
+        .ik-page .zero-home-bar .zero-home-btn {
+            background: rgba(243,156,18,0.18);
+            border: 1px solid rgba(243,156,18,0.45);
+            color: #ffc870;
+        }
+        .ik-page .zero-home-bar .zero-home-btn:hover { background: rgba(243,156,18,0.28); }
+        .ik-page .zero-home-bar .zero-home-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .ik-page .zero-home-bar .zero-home-reset {
+            font-size: 0.82rem;
+            padding: 0.5rem 0.8rem;
+        }
+        .ik-page .zero-home-bar .zero-home-status {
+            font-size: 0.85rem;
+            color: var(--muted, #9db1cc);
+            margin-left: auto;
+            font-variant-numeric: tabular-nums;
+        }
+
+        /* Button style per step (pipeline buttons) */
+        .ik-page .tesis-actions-row .btn-step-fk {
+            background: linear-gradient(180deg, #3d9dff, #1f7bd9);
+            box-shadow: 0 4px 12px rgba(61,157,255,0.25);
+        }
+        .ik-page .tesis-actions-row .btn-step-ik {
+            background: linear-gradient(180deg, #c678dd, #8b4db5);
+            box-shadow: 0 4px 12px rgba(198,120,221,0.28);
+            color: #1a0e24;
+        }
+        .ik-page .tesis-actions-row .btn-step-send {
+            background: linear-gradient(180deg, #2ecc71, #1f8d4e);
+            box-shadow: 0 4px 12px rgba(46,204,113,0.28);
+            color: #062014;
         }
     </style>
 </head>
@@ -411,8 +950,8 @@
 <div class="content">
 
     <section class="hero panel-elevated">
-        <h1 class="hero-title">Cinematica: FK e IK (POE)</h1>
-        <p class="hero-subtitle">Angoli giunti → FK POE → posa (X Y Z, Yaw Pitch Roll) → IK POE (ottimizzazione numerica) → angoli</p>
+        <h1 class="hero-title">Pipeline cinematica IK — teorico vs reale</h1>
+        <p class="hero-subtitle">Target (IK) → esecuzione → stima IMU in base frame → errore di posa</p>
         <div class="diagnostic-row">
             <div class="diag-box">
                 <div class="diag-label">WebSocket</div>
@@ -425,113 +964,229 @@
         </div>
     </section>
 
-    <section class="panel panel-elevated ik-section" id="sec-fk">
-        <div class="ik-section-header" data-target="body-fk">
-            <h2>1 · Forward kinematics (FK POE)</h2>
-            <span class="chevron">&#9660;</span>
+    <!-- ============================================================
+         Pipeline narrative: SEZIONE 1 → 2 → 3 → 4
+         Flusso ingegneristico completo:
+           1) Angoli giunto scelti →
+           2) FK: posa cartesiana POE →
+           3) IK: giunti ricostruiti (verifica round-trip) →
+           4) Applica al robot: target vs posa reale IMU + errore
+         ============================================================ -->
+
+    <div class="pipeline-flow-hint">
+        🧩 giunti  →  📐 FK  →  🔁 IK  →  🤖 robot  →  ⚠️ errore
+    </div>
+
+    <!-- ============================================================
+         SECTION 1 — 🧩 Angoli giunto in ingresso
+         Starting point: i 6 angoli che l'utente impone
+         ============================================================ -->
+    <section class="panel panel-elevated tesis-section joints-section" id="sec-joints-in">
+        <div class="tesis-section-header">
+            <h2>🧩 1 · Angoli giunto in ingresso</h2>
+            <span class="tesis-caption">Punto di partenza della pipeline: angoli virtuali (home = 90°)</span>
         </div>
-        <div class="ik-section-body" id="body-fk">
-            <h3 class="ik-card-title ik-card-title--tight">Ingresso — angoli giunto (°)</h3>
-            <p class="ik-lead">
-                Angoli <strong>virtuali</strong> (home = 90°). Ordine: Base → Spalla → Gomito → Yaw → Pitch → Roll.
-                I range ammessi per casella seguono i <strong>limiti globali</strong> dal controller (<code>routing_config.json</code>).
-            </p>
-            <p class="ik-limits-foot" id="ik-limits-summary-fk">Limiti giunto: caricamento…</p>
-            <div class="ik-num-grid">
-                <div class="ik-num-cell"><label class="lab-pos" for="fk-base">Base<span class="joint-short">B</span></label><input class="ik-num-input" type="number" id="fk-base" value="90" step="0.1" /></div>
-                <div class="ik-num-cell"><label class="lab-pos" for="fk-spalla">Spalla<span class="joint-short">S</span></label><input class="ik-num-input" type="number" id="fk-spalla" value="90" step="0.1" /></div>
-                <div class="ik-num-cell"><label class="lab-pos" for="fk-gomito">Gomito<span class="joint-short">G</span></label><input class="ik-num-input" type="number" id="fk-gomito" value="90" step="0.1" /></div>
-                <div class="ik-num-cell"><label class="lab-pos" for="fk-yaw">Yaw<span class="joint-short">Y</span></label><input class="ik-num-input" type="number" id="fk-yaw" value="90" step="0.1" /></div>
-                <div class="ik-num-cell"><label class="lab-pos" for="fk-pitch">Pitch<span class="joint-short">P</span></label><input class="ik-num-input" type="number" id="fk-pitch" value="90" step="0.1" /></div>
-                <div class="ik-num-cell"><label class="lab-pos" for="fk-roll">Roll<span class="joint-short">R</span></label><input class="ik-num-input" type="number" id="fk-roll" value="90" step="0.1" /></div>
-            </div>
-            <div class="ik-actions">
-                <button class="btn primary sm" id="btn-calc-fk">Calcola FK</button>
-            </div>
-            <h3 class="ik-card-title" style="margin-top:0.85rem;">Uscita — posa end-effector</h3>
-            <p class="ik-lead" style="margin-top:-0.25rem;">
-                <strong>X Y Z</strong> (mm), <strong>Yaw Pitch Roll</strong> (°) — stesso ordine dei campi IK sotto.
-            </p>
-            <div id="fk-status">In attesa</div>
-            <div class="ik-num-grid" id="fk-out-grid">
-                <div class="ik-value-cell out-pose"><div class="cell-label">X (mm)</div><div class="cell-value" id="fk-out-x">—</div></div>
-                <div class="ik-value-cell out-pose"><div class="cell-label">Y (mm)</div><div class="cell-value" id="fk-out-y">—</div></div>
-                <div class="ik-value-cell out-pose"><div class="cell-label">Z (mm)</div><div class="cell-value" id="fk-out-z">—</div></div>
-                <div class="ik-value-cell out-pose"><div class="cell-label">Yaw (°)</div><div class="cell-value" id="fk-out-yaw">—</div></div>
-                <div class="ik-value-cell out-pose"><div class="cell-label">Pitch (°)</div><div class="cell-value" id="fk-out-pitch">—</div></div>
-                <div class="ik-value-cell out-pose"><div class="cell-label">Roll (°)</div><div class="cell-value" id="fk-out-roll">—</div></div>
-            </div>
-            <div class="ik-quat" id="fk-out-quat">Quaternione (xyzw): —</div>
+        <div class="tesis-joint-grid">
+            <div class="pose-cell"><div class="pose-label">Base <span class="unit">°</span></div><input class="pose-input" type="number" id="fk-base" value="90" step="0.1" /></div>
+            <div class="pose-cell"><div class="pose-label">Spalla <span class="unit">°</span></div><input class="pose-input" type="number" id="fk-spalla" value="90" step="0.1" /></div>
+            <div class="pose-cell"><div class="pose-label">Gomito <span class="unit">°</span></div><input class="pose-input" type="number" id="fk-gomito" value="90" step="0.1" /></div>
+            <div class="pose-cell"><div class="pose-label">Yaw <span class="unit">°</span></div><input class="pose-input" type="number" id="fk-yaw" value="90" step="0.1" /></div>
+            <div class="pose-cell"><div class="pose-label">Pitch <span class="unit">°</span></div><input class="pose-input" type="number" id="fk-pitch" value="90" step="0.1" /></div>
+            <div class="pose-cell"><div class="pose-label">Roll <span class="unit">°</span></div><input class="pose-input" type="number" id="fk-roll" value="90" step="0.1" /></div>
+        </div>
+        <p class="ik-limits-foot" id="ik-limits-summary-fk">Limiti giunto: caricamento…</p>
+        <div class="tesis-actions-row">
+            <button class="tesis-btn-primary btn-step-fk" id="btn-calc-fk">▶ Calcola FK</button>
+            <span class="tesis-status-line" id="fk-status">In attesa</span>
         </div>
     </section>
 
-    <div class="ik-flow-hint" role="note">
-        <strong style="color:var(--text,#f6f8fb)">Dopo «Calcola FK»</strong> la posa viene copiata nei campi target IK (modificabili prima di «Calcola IK»).
+    <!-- ============================================================
+         SECTION 2 — 📐 FK: posa cartesiana risultante
+         Output del mapping diretto giunti → posa
+         ============================================================ -->
+    <section class="panel panel-elevated tesis-section fk-section" id="sec-fk-out">
+        <div class="tesis-section-header">
+            <h2>📐 2 · FK: posa cartesiana risultante</h2>
+            <span class="tesis-caption">Modello POE (<code>j5_poe_params.json</code>) sui giunti scelti sopra</span>
+        </div>
+        <div class="tesis-pose-grid">
+            <div class="pose-cell"><div class="pose-label">X <span class="unit">mm</span></div><div class="pose-value" id="fk-out-x">—</div></div>
+            <div class="pose-cell"><div class="pose-label">Y <span class="unit">mm</span></div><div class="pose-value" id="fk-out-y">—</div></div>
+            <div class="pose-cell"><div class="pose-label">Z <span class="unit">mm</span></div><div class="pose-value" id="fk-out-z">—</div></div>
+            <div class="pose-cell"><div class="pose-label">Yaw <span class="unit">°</span></div><div class="pose-value" id="fk-out-yaw">—</div></div>
+            <div class="pose-cell"><div class="pose-label">Pitch <span class="unit">°</span></div><div class="pose-value" id="fk-out-pitch">—</div></div>
+            <div class="pose-cell"><div class="pose-label">Roll <span class="unit">°</span></div><div class="pose-value" id="fk-out-roll">—</div></div>
+        </div>
+        <div class="ik-quat" id="fk-out-quat" style="margin-top:0.7rem;">Quaternione (xyzw): —</div>
+        <div class="tesis-actions-row">
+            <button class="tesis-btn-primary btn-step-ik" id="btn-calc-ik">▶ Calcola IK (usa questa posa come target)</button>
+            <span class="tesis-status-line">
+                Target IK (copia FK): X = <span id="ik-target-mirror-x">—</span> · Y = <span id="ik-target-mirror-y">—</span> · Z = <span id="ik-target-mirror-z">—</span>
+            </span>
+        </div>
+    </section>
+
+    <!-- ============================================================
+         SECTION 3 — 🔁 IK: giunti ricostruiti (round-trip check)
+         Deve coincidere (entro tolleranza) con la Sez 1
+         ============================================================ -->
+    <section class="panel panel-elevated tesis-section ik-round-section" id="sec-ik-round">
+        <div class="tesis-section-header">
+            <h2>🔁 3 · IK: giunti ricostruiti dalla posa FK</h2>
+            <span class="tesis-caption" id="ik-round-caption">Verifica round-trip FK → IK · devono coincidere con Sez 1</span>
+        </div>
+        <div class="tesis-joint-grid ik-round-grid">
+            <div class="pose-cell"><div class="pose-label">Base <span class="unit">°</span></div><div class="pose-value" id="ik-rec-base">—</div></div>
+            <div class="pose-cell"><div class="pose-label">Spalla <span class="unit">°</span></div><div class="pose-value" id="ik-rec-spalla">—</div></div>
+            <div class="pose-cell"><div class="pose-label">Gomito <span class="unit">°</span></div><div class="pose-value" id="ik-rec-gomito">—</div></div>
+            <div class="pose-cell"><div class="pose-label">Yaw <span class="unit">°</span></div><div class="pose-value" id="ik-rec-yaw">—</div></div>
+            <div class="pose-cell"><div class="pose-label">Pitch <span class="unit">°</span></div><div class="pose-value" id="ik-rec-pitch">—</div></div>
+            <div class="pose-cell"><div class="pose-label">Roll <span class="unit">°</span></div><div class="pose-value" id="ik-rec-roll">—</div></div>
+        </div>
+        <div class="round-trip-summary">
+            <span class="ik-error-dot error-dot-idle" id="ik-round-dot">●</span>
+            <span class="error-norm" id="ik-round-max">Max scostamento: —</span>
+            <span class="error-norm" id="ik-round-meta">Solver: — · Iter: — · <span id="ik-elapsed-ms">-</span> ms</span>
+        </div>
+        <div class="error-verdict verdict-idle" id="ik-round-verdict">
+            <span class="verdict-label">Round-trip:</span>
+            <span class="verdict-value" id="ik-round-verdict-value">—</span>
+        </div>
+        <div class="tesis-actions-row">
+            <button class="tesis-btn-primary btn-step-send" id="btn-send-ik" disabled>▶ Invia posa al robot (SETPOSE)</button>
+            <button class="tesis-btn-secondary" id="btn-home-ik">⌂ Home</button>
+            <span class="tesis-status-line" id="ik-round-status">Premi «Calcola IK» dopo aver calcolato la FK.</span>
+        </div>
+        <!-- Zero-at-HOME control: osservabilità-layer, corregge yaw drift BNO085 -->
+        <div class="zero-home-bar">
+            <button class="tesis-btn-secondary zero-home-btn" id="btn-zero-at-home">🎯 Azzera IMU @ HOME</button>
+            <button class="tesis-btn-secondary zero-home-reset" id="btn-reset-zero-home">✕ Reset zero</button>
+            <span class="zero-home-status" id="zero-home-status">
+                <span class="state-dot state-dot-off">●</span> Zero-at-HOME non impostato (pipeline nuda)
+            </span>
+        </div>
+    </section>
+
+    <!-- State strip: pillole IMU / rate / tracking, compatte -->
+    <div class="state-strip">
+        <div class="state-pill state-level-idle" id="state-pill-motion">
+            <div class="state-label">Stato</div>
+            <div class="state-value" id="state-value-motion">IDLE</div>
+        </div>
+        <div class="state-pill state-level-wait" id="state-pill-imu">
+            <div class="state-label">IMU</div>
+            <div class="state-value" id="state-value-imu">WAIT</div>
+        </div>
+        <div class="state-pill state-level-idle" id="state-pill-rate">
+            <div class="state-label">Sample rate</div>
+            <div class="state-value" id="state-value-rate">— Hz</div>
+        </div>
+        <div class="state-pill state-level-idle" id="state-pill-track">
+            <div class="state-label">Tracking IMU</div>
+            <div class="state-value" id="state-value-track"><span class="state-dot state-dot-off">●</span> inattivo</div>
+        </div>
     </div>
 
-    <section class="panel panel-elevated ik-section" id="sec-ik">
-        <div class="ik-section-header" data-target="body-ik">
-            <h2>2 · Inverse kinematics (IK POE)</h2>
-            <span class="chevron">&#9660;</span>
+    <!-- ============================================================
+         SECTION 4 — 🤖 Applica posa · target vs reale IMU
+         ============================================================ -->
+    <section class="panel panel-elevated tesis-section compare-section" id="sec-compare">
+        <div class="tesis-section-header">
+            <h2>🎯🤖 4 · Posa applicata: target (FK) vs reale (IMU)</h2>
+            <span class="tesis-caption">Confronto realtime del robot in esecuzione</span>
         </div>
-        <div class="ik-section-body" id="body-ik">
 
-            <h3 class="ik-card-title ik-card-title--tight">Ingresso — posa desiderata</h3>
-            <p class="ik-lead">
-                <strong>X Y Z</strong> (mm), poi <strong>Yaw Pitch Roll</strong> (°). Angoli risultanti IK rispettano i limiti globali (stessi del backend).
-            </p>
-            <div class="ik-info-banner">
-                <span style="font-size:1.1rem; flex-shrink:0;">ℹ️</span>
-                <span>
-                    Modello <strong>POE</strong> sul Raspberry (<code>j5_poe_params.json</code>). Modifica S/M in
-                    <a href="settings.html" style="color:var(--primary)">Impostazioni</a> → POE.
-                </span>
+        <div class="compare-dual-grid">
+            <!-- Target (= FK output, ciò che il robot dovrebbe raggiungere) -->
+            <div class="compare-subcard target-sub">
+                <div class="compare-subcard-header">
+                    <strong>🎯 Target teorico</strong>
+                    <span class="tesis-caption" id="cmp-meta-target">Copia della posa FK</span>
+                </div>
+                <div class="tesis-pose-grid">
+                    <div class="pose-cell"><div class="pose-label">X <span class="unit">mm</span></div><input class="pose-input" type="number" id="ik-x" value="80" step="0.1" min="-500" max="500" /></div>
+                    <div class="pose-cell"><div class="pose-label">Y <span class="unit">mm</span></div><input class="pose-input" type="number" id="ik-y" value="59.55" step="0.1" min="-500" max="500" /></div>
+                    <div class="pose-cell"><div class="pose-label">Z <span class="unit">mm</span></div><input class="pose-input" type="number" id="ik-z" value="-62.75" step="0.1" min="-500" max="500" /></div>
+                    <div class="pose-cell"><div class="pose-label">Yaw <span class="unit">°</span></div><input class="pose-input" type="number" id="ik-yaw" value="0" step="0.1" min="-180" max="180" /></div>
+                    <div class="pose-cell"><div class="pose-label">Pitch <span class="unit">°</span></div><input class="pose-input" type="number" id="ik-pitch" value="0" step="0.1" min="-180" max="180" /></div>
+                    <div class="pose-cell"><div class="pose-label">Roll <span class="unit">°</span></div><input class="pose-input" type="number" id="ik-roll" value="-90" step="0.1" min="-180" max="180" /></div>
+                </div>
             </div>
 
-            <div class="ik-num-grid">
-                <div class="ik-num-cell"><label class="lab-pos" for="ik-x">X (mm)</label><input class="ik-num-input" type="number" id="ik-x" value="80" step="0.1" min="-500" max="500" /></div>
-                <div class="ik-num-cell"><label class="lab-pos" for="ik-y">Y (mm)</label><input class="ik-num-input" type="number" id="ik-y" value="59.55" step="0.1" min="-500" max="500" /></div>
-                <div class="ik-num-cell"><label class="lab-pos" for="ik-z">Z (mm)</label><input class="ik-num-input" type="number" id="ik-z" value="-62.75" step="0.1" min="-500" max="500" /></div>
-                <div class="ik-num-cell"><label class="lab-rot" for="ik-yaw">Yaw (°)</label><input class="ik-num-input" type="number" id="ik-yaw" value="0" step="0.1" min="-180" max="180" /></div>
-                <div class="ik-num-cell"><label class="lab-rot" for="ik-pitch">Pitch (°)</label><input class="ik-num-input" type="number" id="ik-pitch" value="0" step="0.1" min="-180" max="180" /></div>
-                <div class="ik-num-cell"><label class="lab-rot" for="ik-roll">Roll (°)</label><input class="ik-num-input" type="number" id="ik-roll" value="-90" step="0.1" min="-180" max="180" /></div>
+            <!-- Real: stima IMU in base frame, posizione ancorata a FK wc -->
+            <div class="compare-subcard real-sub">
+                <div class="compare-subcard-header">
+                    <strong>🤖 Posa reale (IMU)</strong>
+                    <span class="tesis-caption" id="cmp-meta-real">In attesa di prime IMU…</span>
+                </div>
+                <div class="tesis-pose-grid">
+                    <div class="pose-cell"><div class="pose-label">X <span class="unit">mm</span></div><div class="pose-value" id="cmp-real-x">—</div></div>
+                    <div class="pose-cell"><div class="pose-label">Y <span class="unit">mm</span></div><div class="pose-value" id="cmp-real-y">—</div></div>
+                    <div class="pose-cell"><div class="pose-label">Z <span class="unit">mm</span></div><div class="pose-value" id="cmp-real-z">—</div></div>
+                    <div class="pose-cell"><div class="pose-label">Yaw <span class="unit">°</span></div><div class="pose-value" id="cmp-real-yaw">—</div></div>
+                    <div class="pose-cell"><div class="pose-label">Pitch <span class="unit">°</span></div><div class="pose-value" id="cmp-real-pitch">—</div></div>
+                    <div class="pose-cell"><div class="pose-label">Roll <span class="unit">°</span></div><div class="pose-value" id="cmp-real-roll">—</div></div>
+                </div>
             </div>
+        </div>
 
-            <div class="ik-check-row">
+        <!-- Error sub-block (dominante) -->
+        <div class="compare-subcard error-sub">
+            <div class="compare-subcard-header">
+                <strong>⚠️ Errore di posa</strong>
+                <span class="tesis-caption" id="cmp-meta-error">Δ = reale − target · soglie: verde &lt; 5 mm / 2°, giallo &lt; 20 mm / 8°, rosso oltre</span>
+            </div>
+            <div class="tesis-pose-grid">
+                <div class="pose-cell"><div class="pose-label">ΔX <span class="unit">mm</span></div><div class="pose-value" id="cmp-error-x">—</div></div>
+                <div class="pose-cell"><div class="pose-label">ΔY <span class="unit">mm</span></div><div class="pose-value" id="cmp-error-y">—</div></div>
+                <div class="pose-cell"><div class="pose-label">ΔZ <span class="unit">mm</span></div><div class="pose-value" id="cmp-error-z">—</div></div>
+                <div class="pose-cell"><div class="pose-label">ΔYaw <span class="unit">°</span></div><div class="pose-value" id="cmp-error-yaw">—</div></div>
+                <div class="pose-cell"><div class="pose-label">ΔPitch <span class="unit">°</span></div><div class="pose-value" id="cmp-error-pitch">—</div></div>
+                <div class="pose-cell"><div class="pose-label">ΔRoll <span class="unit">°</span></div><div class="pose-value" id="cmp-error-roll">—</div></div>
+            </div>
+            <div class="error-summary-row">
+                <span class="ik-error-dot error-dot-idle" id="cmp-error-dot">●</span>
+                <span class="error-norm" id="cmp-error-norm-pos">Errore posizione: —</span>
+                <span class="error-norm" id="cmp-error-norm-rot">Errore orientazione: —</span>
+            </div>
+            <div class="error-verdict verdict-idle" id="ik-error-verdict">
+                <span class="verdict-label">Stato finale:</span>
+                <span class="verdict-value" id="ik-error-verdict-value">—</span>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============================================================
+         UTILITÀ avanzate: params POE tolleranze, save target, debug compare
+         ============================================================ -->
+    <details class="utilities-section" id="sec-utilities">
+        <summary>🔧 Utilità avanzate · solver tolerances · save target · debug compare</summary>
+        <div class="utilities-body">
+            <div class="ik-check-row" style="margin-bottom:0.6rem;">
                 <label style="display:inline-flex; gap:0.45rem; align-items:center; cursor:pointer;">
                     <input type="checkbox" id="ik-reset-solver" checked />
                     Reinizializza solver IK a ogni calcolo
                 </label>
             </div>
-
-            <div class="ik-actions">
-                <button class="btn primary sm" id="btn-calc-ik">Calcola IK</button>
+            <div class="ik-actions" style="margin-bottom:0.8rem;">
                 <button class="btn ghost sm" id="btn-save-target">Salva target cartesiano</button>
                 <span class="save-feedback" id="fb-target"></span>
             </div>
 
-            <h3 class="ik-card-title" style="margin-top:1.1rem;">Uscita — angoli giunto (°)</h3>
-            <p class="ik-lead" style="margin-top:-0.25rem;">
-                Base → Spalla → Gomito → Yaw → Pitch → Roll. Valori mostrati e inviati con <strong>Invia posa</strong> sono clampati ai limiti globali.
-            </p>
+            <!-- IK status badge completo (usato da setIKStatus) -->
             <div id="ik-status-badge" class="ik-status idle">
                 <span id="ik-status-dot">○</span>
                 <span id="ik-status-text">In attesa del calcolo</span>
             </div>
-            <div class="ik-meta-row">
-                Solver riportato: <strong id="ik-solver-used" style="color:var(--text)">N/D</strong>
-                <span style="margin-left:0.75rem;">Tempo: <strong id="ik-elapsed-ms" style="color:var(--text)">-</strong> ms</span>
-            </div>
-            <div class="ik-num-grid ik-result-grid" id="ik-result-grid"></div>
-            <div class="ik-actions" style="margin-top:0.35rem;">
-                <button class="btn ghost sm" id="btn-home-ik">⬤ Home</button>
-                <button class="btn primary sm" id="btn-send-ik" disabled>&#9654; Invia posa</button>
-                <span style="font-size:0.8rem; color:var(--muted); align-self:center;">
-                    Velocità / profilo: <a href="settings.html" style="color:var(--primary)">Impostazioni</a>
-                </span>
+            <div class="ik-meta-row" style="margin:0.5rem 0;">
+                Solver: <strong id="ik-solver-used" style="color:var(--text)">N/D</strong>
             </div>
 
-            <div class="ik-solver-params">
+            <!-- Griglia angoli ridondante usata internamente da btn-send-ik (fallback manuale) -->
+            <div class="ik-num-grid ik-result-grid" id="ik-result-grid"></div>
+
+            <div class="ik-solver-params" style="margin-top:0.8rem;">
                 <p class="ik-solver-params-title">Tolleranze — solver numerico POE</p>
                 <div class="ik-tol-row">
                     <label for="ik-max-pos-error" style="font-size:0.82rem; color:var(--muted);">Errore max posizione (mm)</label>
@@ -539,46 +1194,25 @@
                     <label for="ik-max-ori-error" style="font-size:0.82rem; color:var(--muted);">Errore max orientamento (°)</label>
                     <input type="number" id="ik-max-ori-error" value="10" step="0.1" min="0.1" />
                 </div>
-                <p class="ik-solver-note">
-                    Criteri di arresto dell’ottimizzatore sul POE caricato sul controller (<code>j5_poe_params.json</code>).
-                </p>
             </div>
-        </div>
-    </section>
 
-    <section class="panel panel-elevated ik-section" id="sec-ik-compare">
-        <div class="ik-section-header" data-target="body-ik-compare">
-            <h2>3 · Confronto realtime: target IK, FK live, IMU</h2>
-            <span class="chevron">&#9660;</span>
-        </div>
-        <div class="ik-section-body" id="body-ik-compare">
-            <h3 class="ik-card-title ik-card-title--tight">Finestra di confronto termine a termine</h3>
-            <p class="ik-lead">
-                Quando invii una posa IK, il pannello blocca quel target e mostra in parallelo:
-                <strong>target inviato</strong>, <strong>FK live</strong> dai giunti correnti e una
-                <strong>stima IMU short-term</strong> del tool. L'obiettivo è vedere se i termini tendono davvero alla posa desiderata.
-            </p>
-            <div class="ik-compare-statusbar">
-                <div id="ik-compare-status" class="ik-status idle">
-                    <span>○</span>
-                    <span>Invia una posa IK per armare il confronto realtime</span>
-                </div>
-                <div class="ik-compare-meta" id="ik-compare-meta">
+            <details style="margin-top:0.7rem; font-size:0.78rem; color:var(--muted);">
+                <summary style="cursor:pointer;">Diagnostica compare window</summary>
+                <div class="ik-compare-meta" id="ik-compare-meta" style="margin-top:0.4rem;">
                     Target attivo: nessuno · IMU: in attesa · Sample: -
                 </div>
-            </div>
-            <div class="ik-compare-grid" id="ik-compare-grid"></div>
-            <p class="ik-compare-note">
-                La stima posizione IMU è relativa e a breve finestra: parte dal wrist-center corrente e integra l'accelerometro
-                compensato in gravità. Serve come osservatore realtime di avvicinamento, non come riferimento assoluto a lungo termine.
-            </p>
+                <div id="ik-compare-status" class="ik-status idle" style="margin-top:0.4rem;">
+                    <span>○</span>
+                    <span>Invia una posa IK per armare il confronto</span>
+                </div>
+            </details>
         </div>
-    </section>
+    </details>
 
 </div>
 
 <script src="../shared/js/j5_config.js"></script>
-<script type="module" src="js/pages/ik.js"></script>
+<script type="module" src="js/pages/ik.js?v=zero-at-home-v5"></script>
 
 <script>
   fetch("navbar.html")

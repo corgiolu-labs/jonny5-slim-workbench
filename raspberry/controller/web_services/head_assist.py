@@ -25,6 +25,31 @@ _LIMIT_ORDER = ("base", "spalla", "gomito", "yaw", "pitch", "roll")
 # Cartesian speed regardless of arm extension.
 _REACH_REF_M: float = 0.15
 
+# ============================================================
+# A/B TEST FLAG — invert GOMITO delta in ASSIST pitch remap only.
+# Localized experiment: verify whether inverting dg (GOMITO) improves
+# vertical wrist-centre tracking. Default False (no change).
+# Toggled manually for A/B sessions; meant to be reverted after experiment.
+# Scope: compute_head_motion_follow_physical only. NO OTHER EFFECT.
+# ============================================================
+TEST_INVERT_ELBOW: bool = False
+
+# Rate-limited debug log counter (shared state across all assist ticks).
+_ASSIST_DEBUG_LOG_EVERY_N: int = 25   # ~250 ms @ 100 Hz assist rate
+_assist_debug_log_counter: int = 0
+
+# Upper cap on the reach scaling factor. Measured extreme-workspace tests
+# (verify_assist_extremes.py, 2026-04-19) showed that at very folded poses
+# (reach_xy ≈ 0.046 m, "ALL DOWN") the raw 1/reach_xy term produced scale
+# factors up to 3.0×, making ALL DOWN ~24% more responsive than ALL UP
+# (reach_xy ≈ 0.063 m, scale 2.4×) on the yaw channel and inflating the
+# coupling toward the wrist ROLL servo. Capping scale at the ALL UP level
+# flattens the asymmetry (ALL UP ↔ ALL DOWN) to ≤5% without changing the
+# response at poses where reach_xy ≥ _REACH_REF_M / _REACH_SCALE_CAP
+# (≈0.063 m). At more extended configurations the cap is inactive and the
+# scaling law (1/reach_xy) operates unchanged.
+_REACH_SCALE_CAP: float = 2.4
+
 
 def relief_signed(
     angle: float,
@@ -573,7 +598,7 @@ def compute_head_motion_follow_physical(
             reach_xy_m = float(np.linalg.norm(
                 [float(p_wc[0]) - float(shoulder[0]), float(p_wc[1]) - float(shoulder[1])]
             ))
-            db *= _REACH_REF_M / max(reach_xy_m, 0.05)
+            db *= min(_REACH_SCALE_CAP, _REACH_REF_M / max(reach_xy_m, 0.05))
         except Exception:
             pass  # keep unscaled db on FK failure
 
@@ -602,11 +627,49 @@ def compute_head_motion_follow_physical(
         ds = 0.0
         dg = 0.0
 
+    # A/B TEST: optional elbow sign inversion (default False, no-op).
+    # Applied AFTER remap & static fallback so it flips whichever value
+    # is going to be sent — covers both paths uniformly.
+    if TEST_INVERT_ELBOW:
+        dg = -dg
+
     mstep = float(ha["headMotionMaxStepDegPerTick"])
     db = _clamp(db, -mstep, mstep)
     ds = _clamp(ds, -mstep, mstep)
     dg = _clamp(dg, -mstep, mstep)
     mag = abs(hy) + abs(hp)
+
+    # Rate-limited debug log (~4 Hz). Disabled via counter; zero cost when
+    # no pitch delta is active (the typical idle case). Safe to keep even
+    # after experiment: emits only during active assist.
+    global _assist_debug_log_counter
+    if abs(hp) > 1e-6 or abs(hy) > 1e-6:
+        _assist_debug_log_counter += 1
+        if _assist_debug_log_counter % _ASSIST_DEBUG_LOG_EVERY_N == 0:
+            try:
+                # Reach + scale diagnostic (compute without modifying state)
+                cfg = settings_manager.load()
+                offsets = list(cfg.get("offsets", settings_manager.DEFAULTS["offsets"]))
+                dirs = list(cfg.get("dirs", settings_manager.DEFAULTS.get("dirs", [1,1,1,1,1,1])))
+                _, p_wc = _wrist_center_from_physical(list(physical_six), offsets, dirs)
+                shoulder = _shoulder_origin_m()
+                reach_xy = float(np.linalg.norm(
+                    [float(p_wc[0]) - float(shoulder[0]), float(p_wc[1]) - float(shoulder[1])]
+                ))
+                raw_scale = _REACH_REF_M / max(reach_xy, 0.05)
+                effective_scale = min(_REACH_SCALE_CAP, raw_scale)
+                used_remap = (follow_remap is not None)
+                logger.info(
+                    "[ASSIST DEBUG] pitch_delta=%+.2f yaw_delta=%+.2f ds=%+.3f dg=%+.3f db=%+.3f "
+                    "reach_xy=%.3f raw_scale=%.2f eff_scale=%.2f remap=%s invert_elbow=%s",
+                    float(hp), float(hy), float(ds), float(dg), float(db),
+                    reach_xy, raw_scale, effective_scale,
+                    "Jac" if used_remap else ("static" if abs(hp) > 1e-6 else "none"),
+                    TEST_INVERT_ELBOW,
+                )
+            except Exception:
+                pass
+
     return db, ds, dg, mag
 
 

@@ -404,6 +404,14 @@ static void uart_process_command(uint32_t seq, const char *cmd)
         j5vr_reset_head_calib();
         uart_send_response_with_seq(seq, "OK HEADZERO");
     }
+    else if (strcmp(cmd, "RELAX_DIGITAL") == 0)
+    {
+        /* Rilascia (PWM=0) i servo digitali PITCH e ROLL. Usato dal Pi dopo
+         * SETPOSE_DONE di HOME per ridurre il surriscaldamento dei due giunti
+         * più stressati. Gli altri servo restano ingaggiati. */
+        servo_relax_digital();
+        uart_send_response_with_seq(seq, "OK RELAX_DIGITAL");
+    }
     /* --- SETPOSE_T <B S G Y P R time_ms PLANNER> --- */
     else if (strncmp(cmd, "SETPOSE_T", 9) == 0 && cmd[9] == ' ')
     {
@@ -505,15 +513,16 @@ static void uart_process_command(uint32_t seq, const char *cmd)
             (uint8_t)args[3], (uint8_t)args[4], (uint8_t)args[5],
             (uint8_t)args[6], prof);
     }
-    /* --- SET_OFFSETS <B S G Y P R> --- */
+    /* --- SET_OFFSETS <B S G Y P R> ---
+     * Config-only command: writes _servo_offset_deg[]. Does NOT trigger motion,
+     * does NOT change state, does not affect the currently-running trajectory.
+     * Allowed in any state (SAFE/IDLE/STOPPED) for parity with the other
+     * SET_* config commands (SET_VR_PARAMS, SET_JOINT_LIMITS, SET_PWM_CONFIG),
+     * so Pi-side boot-time sync can succeed BEFORE the first ENABLE transitions
+     * the state machine to IDLE. The motion commands that READ these offsets
+     * (HOME/PARK/TELEOPPOSE/SETPOSE) keep their own STATE_IDLE gate. */
     else if (strncmp(cmd, "SET_OFFSETS", 11) == 0 && cmd[11] == ' ')
     {
-        if (state_machine_get_state() != STATE_IDLE)
-        {
-            uart_send_response_with_seq(seq, "ERR BUSY");
-            return;
-        }
-
         const char *p = cmd + 11;
         unsigned int args[6];
         bool fmt_ok = true;

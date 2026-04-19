@@ -114,6 +114,10 @@ typedef struct {
     float    prev_vel[SERVO_COUNT];
     float    max_velocity_deg_s;
     float    max_accel_deg_s2;
+    /* Opt-in: rilascia i servo digitali (PITCH/ROLL) quando il trajectory
+     * finisce. Usato dal comando HOME per evitare surriscaldamento dei due
+     * servo più stressati al termine del centraggio. */
+    bool     relax_digital_on_finish;
 } j5_setpose_state_t;
 
 static j5_setpose_state_t g_setpose_state = { .active = false };
@@ -223,6 +227,15 @@ bool j5vr_setpose_tick(uint32_t rt_tick)
                  (double)g_setpose_state.max_velocity_deg_s,
                  (double)g_setpose_state.max_accel_deg_s2);
         uart_send_unsolicited(msg);
+
+        /* Post-completion relax, opt-in. Only HOME sets this flag so SETPOSE /
+         * SETPOSE_T / TELEOPPOSE / PARK keep their PWM engaged as before. */
+        if (g_setpose_state.relax_digital_on_finish)
+        {
+            g_setpose_state.relax_digital_on_finish = false;
+            servo_relax_digital();
+            uart_send_unsolicited("RELAX_DIGITAL pitch roll");
+        }
     }
 
     return true;
@@ -295,8 +308,19 @@ void j5vr_go_setpose(
     }
     g_setpose_state.max_velocity_deg_s = 0.0f;
     g_setpose_state.max_accel_deg_s2   = 0.0f;
+    /* Clear the opt-in relax flag; callers that want it (HOME) must re-request
+     * via j5vr_setpose_request_relax_digital_on_finish() AFTER this call. */
+    g_setpose_state.relax_digital_on_finish = false;
 
     g_setpose_state.active = true;
+}
+
+void j5vr_setpose_request_relax_digital_on_finish(void)
+{
+    /* Must be called strictly AFTER j5vr_go_setpose()/j5vr_go_setpose_time() so
+     * the start-of-motion reset doesn't clobber the request. Safe to call even
+     * if no setpose is active (the flag will just be cleared at next start). */
+    g_setpose_state.relax_digital_on_finish = true;
 }
 
 /* -----------------------------------------------------------------------
@@ -332,6 +356,7 @@ void j5vr_go_setpose_time(
     }
     g_setpose_state.max_velocity_deg_s = 0.0f;
     g_setpose_state.max_accel_deg_s2   = 0.0f;
+    g_setpose_state.relax_digital_on_finish = false;
 
     *pactive = true;
 }

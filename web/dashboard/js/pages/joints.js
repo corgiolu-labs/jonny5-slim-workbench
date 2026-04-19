@@ -24,6 +24,8 @@ import {
   registerTelemetryHandler,
   registerSetposeDoneHandler,
   registerUartResponseHandler,
+  registerSettingsHandler,
+  registerOpenHandler,
   sendCommand,
   addLog,
   loadRoutingConfig,
@@ -52,9 +54,24 @@ const JOINTS = [
   { key: "servo_deg_R", id: "joint-roll",   label: "Roll",   limitKey: "roll" },
 ];
 
+// Limiti VIRTUALI applicati agli slider (90 = HOME). Partono dai default
+// conservativi e vengono rimpiazzati dalla conversione fisico→virtuale una
+// volta ricevuti routing_config (fisico) e settings (offsets+dirs).
+//
+// NOTA SPAZI ANGOLARI:
+//   routing_config.limits → SPAZIO FISICO (quello che il firmware clampa)
+//   slider / SETPOSE inviato dal browser → SPAZIO VIRTUALE
+//   conversione inversa: virtuale = (fisico - offset) / dir + 90
+// Gli slider devono essere nello spazio virtuale coerente col backend,
+// altrimenti l'utente raggiunge valori che il backend rifiuta con warning.
 let jointLimits = Object.fromEntries(
   Object.entries(JOINT_LIMIT_DEFAULTS).map(([k, v]) => [k, { ...v }]),
 );
+
+// Limiti FISICI autorevoli da routing_config.limits. null finché la fetch
+// HTTP non completa; mantenuti separati da jointLimits per poter ricomputare
+// lo spazio virtuale al cambio di offsets/dirs (settings).
+let physicalLimits = null;
 
 // ---------------------------------------------------------------------------
 // Stato planner, velocità e modalità invio
@@ -110,13 +127,14 @@ function clampJointValues(vals) {
   return JOINTS.map(({ limitKey }, i) => clampToJointLimit(limitKey, vals[i]));
 }
 
-async function loadJointLimitsFromRoutingConfig() {
+async function loadPhysicalLimitsFromRoutingConfig() {
   try {
     const cfg = await loadRoutingConfig();
     const limits = cfg?.limits;
     if (!limits || typeof limits !== "object") {
       throw new Error("routing_config senza sezione limits");
     }
+    const phys = {};
     let loaded = 0;
     for (const { limitKey } of JOINTS) {
       const row = limits[limitKey];
@@ -124,19 +142,102 @@ async function loadJointLimitsFromRoutingConfig() {
       const min = Number(row.min);
       const max = Number(row.max);
       if (Number.isFinite(min) && Number.isFinite(max) && min >= 0 && max <= 180 && min < max) {
-        jointLimits[limitKey] = { min, max };
+        phys[limitKey] = { min, max };
         loaded += 1;
       }
     }
     if (loaded > 0) {
-      addLog(`✓ Limiti Joints caricati da routing_config (${loaded}/${JOINTS.length})`);
+      physicalLimits = phys;
+      addLog(`✓ Limiti fisici caricati da routing_config (${loaded}/${JOINTS.length})`);
       return;
     }
     throw new Error("nessun limite valido trovato");
   } catch (e) {
     console.warn("[Joints] fallback limiti UI", e);
-    addLog(`⚠ Limiti Joints non disponibili: uso fallback temporaneo (${String(e)})`);
+    addLog(`⚠ routing_config non disponibile: slider usano fallback virtuale (${String(e)})`);
   }
+}
+
+// Converte i limiti fisici (routing_config) in limiti virtuali (slider) usando
+// offsets e dirs di j5_settings. Se dir[i] = -1 la relazione lineare inverte
+// il segno e min/max si scambiano, quindi calcoliamo entrambi i bound e poi
+// riordiniamo.
+function applyVirtualLimitsFromSettings(settings) {
+  if (!physicalLimits) return;
+  const offsets = settings?.offsets;
+  const dirsIn  = settings?.dirs;
+  if (!Array.isArray(offsets) || offsets.length !== 6) return;
+  const dirs = Array.isArray(dirsIn) && dirsIn.length === 6
+    ? dirsIn.map((d) => (Number(d) < 0 ? -1 : 1))
+    : [1, 1, 1, 1, 1, 1];
+
+  let updated = 0;
+  JOINTS.forEach(({ limitKey }, i) => {
+    const phys = physicalLimits[limitKey];
+    if (!phys) return;
+    const off = Number(offsets[i]);
+    if (!Number.isFinite(off)) return;
+    const dir = dirs[i];
+    // virtuale = (fisico - off) / dir + 90
+    const a = (phys.min - off) / dir + 90;
+    const b = (phys.max - off) / dir + 90;
+    let vmin = Math.round(Math.min(a, b));
+    let vmax = Math.round(Math.max(a, b));
+    // Clamp al range slider valido; il range di sicurezza firmware [5,175]
+    // è già garantito dal clamp fisico downstream.
+    vmin = Math.max(0, Math.min(180, vmin));
+    vmax = Math.max(0, Math.min(180, vmax));
+    if (vmin < vmax) {
+      jointLimits[limitKey] = { min: vmin, max: vmax };
+      updated += 1;
+    }
+  });
+  if (updated > 0) {
+    addLog(`✓ Range slider allineato ai limiti firmware (${updated}/${JOINTS.length})`);
+    refreshSliderRanges();
+    // Log diagnostico: permette di verificare in DevTools console che la fix
+    // è quella nuova e quali range sono effettivamente stati applicati.
+    try {
+      const snap = {};
+      JOINTS.forEach(({ limitKey, id }) => {
+        const s = document.getElementById(id + "-slider");
+        snap[limitKey] = {
+          jointLimits: jointLimits[limitKey],
+          slider_min: s ? s.min : null,
+          slider_max: s ? s.max : null,
+        };
+      });
+      console.log("[JOINTS-FIX v2] applyVirtualLimitsFromSettings →", snap);
+    } catch (_) { /* non-fatal */ }
+  }
+}
+
+// Propaga jointLimits aggiornati sugli slider esistenti (min/max/value e
+// etichette min/max) senza ricostruire il DOM. Se lo slider era fuori dal
+// nuovo range lo clampa e aggiorna anche il testo del target.
+function refreshSliderRanges() {
+  JOINTS.forEach(({ id, limitKey }) => {
+    const { min, max } = getJointLimit(limitKey);
+    const slider = document.getElementById(id + "-slider");
+    if (slider) {
+      slider.min = String(min);
+      slider.max = String(max);
+      const cur = parseInt(slider.value, 10);
+      if (Number.isFinite(cur)) {
+        const clamped = Math.max(min, Math.min(max, cur));
+        if (clamped !== cur) {
+          slider.value = String(clamped);
+          const targetEl = document.getElementById(id + "-target");
+          if (targetEl) targetEl.textContent = clamped + "°";
+        }
+      }
+    }
+    const card = slider?.closest(".joint-card");
+    const minLabel = card?.querySelector(".joint-min");
+    const maxLabel = card?.querySelector(".joint-max");
+    if (minLabel) minLabel.textContent = `${min}°`;
+    if (maxLabel) maxLabel.textContent = `${max}°`;
+  });
 }
 
 function buildPoseCmd(vals) {
@@ -482,7 +583,8 @@ function showMoveNote() {
 // Init
 // ---------------------------------------------------------------------------
 async function init() {
-  await loadJointLimitsFromRoutingConfig();
+  console.log("[JOINTS-FIX v2] joints.js loaded — virtual slider limits derived from routing_config + settings");
+  await loadPhysicalLimitsFromRoutingConfig();
   buildUI();
   initModeToggle();
   initSpeedSlider();
@@ -492,6 +594,19 @@ async function init() {
   initUndoPoseButton();
   initCenterAllButton();
   initSetposeDoneHandler();
+  // Settings (offsets, dirs) necessari per convertire i limiti fisici in
+  // limiti virtuali coerenti con lo slider. Ci interessa SOLO la risposta
+  // type="settings" (full state); "settings_saved"/"offsets_applied" non
+  // trasportano entrambi offsets+dirs, quindi per quei broadcast richiediamo
+  // un refresh esplicito.
+  registerSettingsHandler((msg) => {
+    if (!msg) return;
+    if (msg.type === "settings") {
+      applyVirtualLimitsFromSettings(msg);
+    } else if (msg.type === "settings_saved" || msg.type === "offsets_applied") {
+      sendCommand("get_settings");
+    }
+  });
   registerUartResponseHandler((msg) => {
     if (msg?.type === "uart_response" && msg?.warning) {
       addLog(`⚠ ${msg.warning}`);
@@ -500,6 +615,9 @@ async function init() {
   });
   showMoveNote();
   registerTelemetryHandler(onTelemetry);
+  registerOpenHandler(() => {
+    sendCommand("get_settings");
+  });
   connectJ5Dashboard();
   addLog("Pagina Joints caricata — SETPOSE attivo");
 }

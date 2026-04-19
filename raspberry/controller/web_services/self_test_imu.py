@@ -371,6 +371,8 @@ async def run_axis_direction_test(
     dirs = cfg.get("dirs", val.settings_manager.DEFAULTS.get("dirs", [1, 1, 1, 1, 1, 1]))
     mount_cfg = _load_mount_rotation(mount_config)
     r_mount = val._mount_rotation_from_config(mount_cfg)
+    # Optional world-frame yaw bias (identity if absent → backward-compatible).
+    r_world_bias = val._world_bias_rotation()
 
     ssl_ctx = None
     if url.startswith("wss://"):
@@ -413,7 +415,7 @@ async def run_axis_direction_test(
         home_last = next((m for m in reversed(home_msgs) if bool(m.get("imu_valid", False))), None)
         if home_last is None:
             raise RuntimeError("No valid HOME telemetry sample")
-        _, _, r_home_pred_abs = real_run._telemetry_to_rotations(home_last, offsets, dirs, r_mount)
+        _, _, r_home_pred_abs = real_run._telemetry_to_rotations(home_last, offsets, dirs, r_mount, r_world_bias)
 
         current_label = ""
         for pose_name, pose_virtual in poses:
@@ -508,7 +510,7 @@ async def run_axis_direction_test(
             for msg in pose_msgs:
                 if not bool(msg.get("imu_valid", False)):
                     continue
-                _, r_imu_raw, r_pred_abs = real_run._telemetry_to_rotations(msg, offsets, dirs, r_mount)
+                _, r_imu_raw, r_pred_abs = real_run._telemetry_to_rotations(msg, offsets, dirs, r_mount, r_world_bias)
                 r_pred_rel = r_home_pred_abs.inv() * r_pred_abs
                 r_imu_rel = r_home_imu_zero.inv() * r_imu_raw
                 phi_pred = r_pred_rel.as_rotvec()

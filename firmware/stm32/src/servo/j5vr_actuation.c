@@ -514,6 +514,12 @@ void j5vr_actuation_init(void)
  * j5vr_center_all_servos — porta tutti i servo alla posa HOME tramite SETPOSE (RTR5).
  * Non scrive direttamente desired_positions[]: delega al RT loop via g_setpose_state.
  * Ritorna immediatamente (non bloccante).
+ *
+ * Dopo che la traiettoria di centraggio è terminata, i servo PITCH e ROLL
+ * vengono rilasciati automaticamente (PWM=0) per ridurre il surriscaldamento
+ * dei due giunti più stressati. Gli altri servo restano ingaggiati. La richiesta
+ * è valida solo per questo setpose: il flag viene consumato in SETPOSE_DONE e
+ * azzerato al prossimo j5vr_go_setpose (nessun effetto su SETPOSE/PARK/TELEOPPOSE).
  */
 void j5vr_center_all_servos(void)
 {
@@ -527,6 +533,9 @@ void j5vr_center_all_servos(void)
         40U,
         J5_PROFILE_RTR5
     );
+    /* Richiedi il rilascio di PITCH/ROLL al termine di QUESTO setpose (HOME).
+     * Deve essere chiamata DOPO j5vr_go_setpose(), che azzera il flag all'avvio. */
+    j5vr_setpose_request_relax_digital_on_finish();
 }
 
 /**

@@ -150,9 +150,13 @@ def _mean_pose_rotation(
     msgs: list[dict[str, Any]],
     offsets: list[int],
     r_mount: R,
+    r_world_bias: R | None = None,
 ) -> tuple[R, R, list[float], int]:
     """From a telemetry window, average IMU rotation and compute POE-predicted rotation
-    using dirs=[+1]*6 (canonical, ignoring runtime dirs). Returns (r_meas, r_pred, mean_phys, n)."""
+    using dirs=[+1]*6 (canonical, ignoring runtime dirs). Returns (r_meas, r_pred, mean_phys, n).
+
+    r_world_bias (if supplied) composes as: r_pred = R_world_bias · R_ee · R_mount.
+    Defaults to identity for backward compatibility."""
     dirs_test = [1, 1, 1, 1, 1, 1]
     imu_quats: list[np.ndarray] = []
     phys_samples: list[list[float]] = []
@@ -160,7 +164,7 @@ def _mean_pose_rotation(
         if not bool(msg.get("imu_valid", False)):
             continue
         try:
-            servo, r_imu, r_pred_abs = real_run._telemetry_to_rotations(msg, offsets, dirs_test, r_mount)
+            servo, r_imu, r_pred_abs = real_run._telemetry_to_rotations(msg, offsets, dirs_test, r_mount, r_world_bias)
         except ValueError:
             continue
         imu_quats.append(r_imu.as_quat())
@@ -173,7 +177,10 @@ def _mean_pose_rotation(
     phys_mean = [float(x) for x in phys_arr.mean(axis=0)]
     # Predicted rotation from the mean physical angles, using canonical dirs=[+1]*6
     r_ee_pred = val._ee_rotation_from_servo_physical_deg(phys_mean, offsets, dirs_test)
-    r_pred_mean = r_ee_pred * r_mount
+    if r_world_bias is None:
+        r_pred_mean = r_ee_pred * r_mount
+    else:
+        r_pred_mean = r_world_bias * r_ee_pred * r_mount
     return r_imu_mean, r_pred_mean, phys_mean, len(imu_quats)
 
 
@@ -214,6 +221,7 @@ async def _test_one_joint(
     pose_settle: float,
     sample_s: float,
     rate_hz: float,
+    r_world_bias: R | None = None,
 ) -> JointSignResult:
     """Execute the sign test on a single joint index (0..5)."""
     virt_plus = list(HOME_VIRTUAL)
@@ -226,7 +234,7 @@ async def _test_one_joint(
         runner, virt_plus, settle_s=pose_settle, sample_s=sample_s,
         rate_hz=rate_hz, vel_deg_s=vel_deg_s, profile=profile,
     )
-    r_imu_p, r_pred_p, phys_p, n_p = _mean_pose_rotation(msgs_p, offsets, r_mount)
+    r_imu_p, r_pred_p, phys_p, n_p = _mean_pose_rotation(msgs_p, offsets, r_mount, r_world_bias)
 
     # return to HOME (safety)
     await _go_home_and_settle(runner, home_settle)
@@ -236,7 +244,7 @@ async def _test_one_joint(
         runner, virt_minus, settle_s=pose_settle, sample_s=sample_s,
         rate_hz=rate_hz, vel_deg_s=vel_deg_s, profile=profile,
     )
-    r_imu_m, r_pred_m, phys_m, n_m = _mean_pose_rotation(msgs_m, offsets, r_mount)
+    r_imu_m, r_pred_m, phys_m, n_m = _mean_pose_rotation(msgs_m, offsets, r_mount, r_world_bias)
 
     # back to HOME
     await _go_home_and_settle(runner, home_settle)
@@ -321,6 +329,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     offsets = cfg.get("offsets", settings_manager.DEFAULTS["offsets"])
     dirs_cur = cfg.get("dirs", settings_manager.DEFAULTS.get("dirs", [1] * 6))
     r_mount = _resolve_mount_rotation(args.mount_config, bool(args.ignore_mount))
+    # Optional world-frame yaw bias (identity if absent → backward-compatible).
+    r_world_bias = R.identity() if bool(args.ignore_mount) else val._world_bias_rotation()
 
     ssl_ctx = None
     if args.url.startswith("wss://"):
@@ -351,6 +361,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 pose_settle=float(args.pose_settle),
                 sample_s=float(args.sample_seconds),
                 rate_hz=float(args.rate),
+                r_world_bias=r_world_bias,
             )
             joint_results.append(res)
 

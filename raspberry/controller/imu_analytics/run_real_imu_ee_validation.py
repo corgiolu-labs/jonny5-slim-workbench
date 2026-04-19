@@ -176,14 +176,32 @@ class WSRunner:
         return out
 
 
-def _telemetry_to_rotations(msg: dict[str, Any], offsets: list[int], dirs: list[int], r_mount: R) -> tuple[list[float], R, R]:
+def _telemetry_to_rotations(
+    msg: dict[str, Any],
+    offsets: list[int],
+    dirs: list[int],
+    r_mount: R,
+    r_world_bias: R | None = None,
+) -> tuple[list[float], R, R]:
+    """Turn one telemetry message into (servo_deg, r_imu_measured, r_pred_absolute).
+
+    r_pred_absolute = R_world_bias · R_ee · R_mount
+
+    r_world_bias defaults to identity when not supplied, preserving the historical
+    single-rotation model (R_imu = R_ee · R_mount) used by callers that do not yet
+    pass a world-bias. The validation layer supplies it when the optional
+    imu_world_bias config is present.
+    """
     servo = val._extract_joint_physical_deg(msg)
     q_imu = val._extract_imu_quat_xyzw(msg)
     if servo is None or q_imu is None:
         raise ValueError("Telemetry sample missing servo or IMU quaternion")
     r_ee = val._ee_rotation_from_servo_physical_deg(servo, offsets, dirs)
     r_imu = R.from_quat(q_imu)
-    r_pred_abs = r_ee * r_mount
+    if r_world_bias is None:
+        r_pred_abs = r_ee * r_mount
+    else:
+        r_pred_abs = r_world_bias * r_ee * r_mount
     return servo, r_imu, r_pred_abs
 
 
@@ -195,12 +213,13 @@ def _summarize_pose(
     r_home_imu_zero: R,
     r_home_pred_abs: R,
     compare_identity: bool,
+    r_world_bias: R | None = None,
 ) -> tuple[list[TelemetrySample], dict[str, Any]]:
     samples: list[TelemetrySample] = []
     for msg in telemetry_msgs:
         if not bool(msg.get("imu_valid", False)):
             continue
-        servo, r_imu_raw, r_pred_abs = _telemetry_to_rotations(msg, offsets, dirs, r_mount)
+        servo, r_imu_raw, r_pred_abs = _telemetry_to_rotations(msg, offsets, dirs, r_mount, r_world_bias)
         r_imu_rel = r_home_imu_zero.inv() * r_imu_raw
         r_pred_rel = r_home_pred_abs.inv() * r_pred_abs
         _, theta, yaw_e, pitch_e, roll_e = val._error_metrics(r_pred_rel, r_imu_rel)
@@ -393,7 +412,26 @@ async def run(args: argparse.Namespace) -> tuple[Path, Path, dict[str, Any]]:
     cfg = val.settings_manager.load()
     offsets = cfg.get("offsets", val.settings_manager.DEFAULTS["offsets"])
     dirs = cfg.get("dirs", val.settings_manager.DEFAULTS.get("dirs", [1, 1, 1, 1, 1, 1]))
-    r_mount = R.identity() if bool(args.compare_identity_only) else val._mount_rotation_from_config(Path(args.mount_config))
+    # Load mount config: prior versions of this tool passed Path directly to
+    # _mount_rotation_from_config (which expects a dict) and crashed. Load the
+    # dict here through the same strict/legacy path that validate_imu_vs_ee uses.
+    if bool(args.compare_identity_only):
+        r_mount = R.identity()
+    else:
+        import json as _json
+        from controller.web_services import runtime_config_paths as _rcfg
+        mount_path = Path(args.mount_config).resolve()
+        runtime_mount_path = Path(_rcfg.get_runtime_config_path("imu_ee_mount")).resolve()
+        if mount_path == runtime_mount_path:
+            mount_cfg = _rcfg.load_imu_ee_mount_strict()
+        else:
+            if not mount_path.exists():
+                raise RuntimeError(f"[imu_ee_mount] mount config mancante: {mount_path}")
+            mount_cfg = _json.loads(mount_path.read_text(encoding="utf-8"))
+            _rcfg.validate_imu_ee_mount_shape(mount_cfg)
+        r_mount = val._mount_rotation_from_config(mount_cfg)
+    # Optional world-bias rotation (validation-path only; identity if file absent).
+    r_world_bias = R.identity() if bool(args.compare_identity_only) else val._world_bias_rotation()
 
     ssl_ctx = None
     if args.url.startswith("wss://"):
@@ -440,7 +478,7 @@ async def run(args: argparse.Namespace) -> tuple[Path, Path, dict[str, Any]]:
         home_last = next((m for m in reversed(home_msgs) if bool(m.get("imu_valid", False))), None)
         if home_last is None:
             raise RuntimeError("No valid HOME telemetry sample")
-        _, _, r_home_pred_abs = _telemetry_to_rotations(home_last, offsets, dirs, r_mount)
+        _, _, r_home_pred_abs = _telemetry_to_rotations(home_last, offsets, dirs, r_mount, r_world_bias)
 
         for pose_name, pose_virtual in poses:
             cmd = f"SETPOSE {' '.join(str(v) for v in pose_virtual)} {int(args.vel_deg_s)} {args.profile}"
@@ -459,6 +497,7 @@ async def run(args: argparse.Namespace) -> tuple[Path, Path, dict[str, Any]]:
                 r_home_imu_zero,
                 r_home_pred_abs,
                 bool(args.compare_identity),
+                r_world_bias,
             )
             pose_rows.extend((pose_name, s) for s in samples)
             pose_summaries[pose_name] = {

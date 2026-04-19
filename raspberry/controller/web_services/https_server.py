@@ -177,6 +177,9 @@ class J5HTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         if path_clean == "/api/video-config":
             self._handle_get_video_config()
             return
+        if path_clean == "/api/imu-frame-calib":
+            self._handle_get_imu_frame_calib()
+            return
         super().do_GET()
 
     def do_POST(self):
@@ -186,6 +189,12 @@ class J5HTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
         if path_clean == "/api/webrtc-whep":
             self._handle_webrtc_whep_proxy()
+            return
+        if path_clean == "/api/imu-home-ref":
+            self._handle_post_imu_home_ref()
+            return
+        if path_clean == "/api/imu-home-ref/clear":
+            self._handle_delete_imu_home_ref()
             return
         self.send_error(404, "Not found")
 
@@ -206,6 +215,171 @@ class J5HTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+
+    def _handle_get_imu_frame_calib(self):
+        """Return IMU-to-EE mount and BNO085 world_bias quaternions for the
+        compare/observability layer on the dashboard.
+
+        Same JSON files the `imu_analytics` validators consume; exposed here
+        read-only so the FK/IK compare window can express the IMU estimate
+        in robot base frame via:
+            R_ee = R_world_bias^-1 · R_imu · R_mount^-1
+        Missing or malformed configs fall back to identity quaternions,
+        preserving the previous raw-IMU behavior (backward compatible).
+        """
+        def _normalize(cfg):
+            """Extract quat_wxyz from {quat_wxyz:[4]} or {rpy_deg:[3]}; identity otherwise."""
+            identity = [1.0, 0.0, 0.0, 0.0]
+            if not isinstance(cfg, dict):
+                return identity
+            q = cfg.get("quat_wxyz")
+            if isinstance(q, list) and len(q) == 4:
+                try:
+                    return [float(v) for v in q]
+                except (TypeError, ValueError):
+                    return identity
+            rpy = cfg.get("rpy_deg")
+            if isinstance(rpy, list) and len(rpy) == 3:
+                try:
+                    import math
+                    roll, pitch, yaw = [math.radians(float(v)) for v in rpy]
+                    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+                    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+                    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+                    return [
+                        cr * cp * cy + sr * sp * sy,
+                        sr * cp * cy - cr * sp * sy,
+                        cr * sp * cy + sr * cp * sy,
+                        cr * cp * sy - sr * sp * cy,
+                    ]
+                except (TypeError, ValueError):
+                    return identity
+            return identity
+
+        try:
+            mount_cfg = rcfg.load_runtime_json("imu_ee_mount", default=None)
+        except Exception:
+            mount_cfg = None
+        try:
+            world_bias_cfg = rcfg.load_runtime_json("imu_world_bias", default=None)
+        except Exception:
+            world_bias_cfg = None
+        try:
+            home_ref_cfg = rcfg.load_runtime_json("imu_home_ref", default=None)
+        except Exception:
+            home_ref_cfg = None
+
+        payload = {
+            "mount": {
+                "quat_wxyz": _normalize(mount_cfg),
+                "present": isinstance(mount_cfg, dict),
+            },
+            "world_bias": {
+                "quat_wxyz": _normalize(world_bias_cfg),
+                "present": isinstance(world_bias_cfg, dict),
+            },
+            "home": {
+                # "Zero at HOME" offset capturato via POST /api/imu-home-ref.
+                # Optional: se assente → identity (nessuna correzione aggiuntiva).
+                "quat_wxyz": _normalize(home_ref_cfg),
+                "present": isinstance(home_ref_cfg, dict),
+                "calibrated_at": home_ref_cfg.get("calibrated_at") if isinstance(home_ref_cfg, dict) else None,
+            },
+        }
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_post_imu_home_ref(self):
+        """Save IMU "zero at HOME" quaternion to config_runtime/imu/imu_home_ref.json.
+
+        Scope: compare/observability layer only. This file is consumed only by the
+        FK/IK dashboard to cancel a residual yaw drift in the BNO085 magnetometer-
+        derived Rotation Vector; it is NOT consulted by any teleop / VR / SPI /
+        firmware operational path.
+
+        Expected payload: {"quat_wxyz": [w,x,y,z], "calibrated_at": "...", "fk_pose_mm": [...]}.
+        Only quat_wxyz is mandatory. Everything else is informational metadata.
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(raw.decode("utf-8")) if raw else {}
+            except Exception as e:
+                raise RuntimeError(f"JSON non valido: {e}")
+            rcfg.validate_imu_home_ref_shape(payload)
+
+            # Sanitize: keep only well-known fields to avoid storing stray data.
+            quat_wxyz = [float(v) for v in payload["quat_wxyz"]]
+            record = {"quat_wxyz": quat_wxyz}
+            if isinstance(payload.get("calibrated_at"), str):
+                record["calibrated_at"] = payload["calibrated_at"]
+            else:
+                import datetime
+                record["calibrated_at"] = datetime.datetime.now(
+                    tz=datetime.timezone.utc
+                ).isoformat(timespec="seconds").replace("+00:00", "Z")
+            if isinstance(payload.get("fk_pose_mm"), list) and len(payload["fk_pose_mm"]) == 6:
+                try:
+                    record["fk_pose_mm"] = [float(v) for v in payload["fk_pose_mm"]]
+                except (TypeError, ValueError):
+                    pass
+            if isinstance(payload.get("joints_virtual_deg"), list) and len(payload["joints_virtual_deg"]) == 6:
+                try:
+                    record["joints_virtual_deg"] = [float(v) for v in payload["joints_virtual_deg"]]
+                except (TypeError, ValueError):
+                    pass
+            if isinstance(payload.get("note"), str) and len(payload["note"]) < 200:
+                record["note"] = payload["note"]
+
+            path = rcfg.get_runtime_config_write_path("imu_home_ref")
+            rcfg.ensure_parent_dir(path)
+            rcfg._write_text_atomic(path, json.dumps(record, indent=2) + "\n")
+
+            body = json.dumps({"ok": True, "path": path, "record": record}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as e:
+            body = json.dumps({"ok": False, "error": str(e)}).encode("utf-8")
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+
+    def _handle_delete_imu_home_ref(self):
+        """Remove imu_home_ref.json (reset Zero-at-HOME correction)."""
+        try:
+            import os as _os
+            path = rcfg.get_runtime_config_write_path("imu_home_ref")
+            removed = False
+            if _os.path.isfile(path):
+                _os.remove(path)
+                removed = True
+            body = json.dumps({"ok": True, "removed": removed, "path": path}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as e:
+            body = json.dumps({"ok": False, "error": str(e)}).encode("utf-8")
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
 
     def _handle_get_vr_config_defaults(self):
         """Restituisce i default autorevoli backend per routing/tuning VR-IMU."""

@@ -11,6 +11,7 @@
  */
 
 #include "imu.h"
+#include "imu/bno085.h"
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/drivers/i2c.h>
@@ -191,6 +192,46 @@ void imu_i2c_bus_recovery(void)
 #endif
 
 	LOG_WRN("[IMU] I2C bus recovery done");
+}
+
+/* Set to true by the bus scan when a BNO085 (0x4A or 0x4B) is found on I2C1.
+ * Consumed by imu_init() to stop the MPU6050 retry loop so the BNO085 driver
+ * has exclusive access to the bus. */
+static bool s_bno085_detected = false;
+
+/* Diagnostic-only: scan I2C bus and log every address that ACKs.
+ * Useful when the sensor on the bus is unknown or has been swapped (e.g. BNO085
+ * at 0x4A/0x4B in place of MPU6050 at 0x68). Uses a 1-byte raw i2c_read which
+ * is protocol-agnostic: any device present must ACK its address.
+ */
+static void imu_i2c_scan_bus(const struct device *bus, const char *name)
+{
+	if (bus == NULL || !device_is_ready(bus)) {
+		LOG_WRN("[IMU] %s SCAN skipped: bus not ready", name);
+		return;
+	}
+	char line[160];
+	int n = snprintf(line, sizeof(line), "[IMU] %s SCAN 0x08-0x77:", name);
+	int hits = 0;
+	for (uint16_t addr = 0x08; addr <= 0x77; addr++) {
+		uint8_t b = 0;
+		int r = i2c_read(bus, &b, 1, addr);
+		if (r == 0) {
+			if (n < (int)sizeof(line) - 8) {
+				n += snprintf(line + n, sizeof(line) - n,
+					      " 0x%02X", (unsigned)addr);
+			}
+			hits++;
+			if (addr == 0x4A || addr == 0x4B) {
+				s_bno085_detected = true;
+			}
+		}
+	}
+	if (hits == 0) {
+		LOG_WRN("[IMU] %s SCAN: no devices ACKed", name);
+	} else {
+		LOG_INF("%s  (%d device(s))", line, hits);
+	}
 }
 
 static void imu_i2c_probe_log(void)
@@ -379,17 +420,49 @@ static void imu_calibrate_gyro_bias(void)
 
 int imu_init(void)
 {
+	/* Reset internal quat + sample counter regardless of which backend we
+	 * end up using. Double-buffer remains stale until first publish. */
+	g_imu_orientation_valid = false;
+	g_imu_sample_counter = 0;
+	g_imu_quat.w = 1.0f;
+	g_imu_quat.x = 0.0f;
+	g_imu_quat.y = 0.0f;
+	g_imu_quat.z = 0.0f;
+
+	/* Bus recovery: good hygiene for any I2C device after reset/flash. */
+	imu_i2c_bus_recovery();
+
+	/* Diagnostic bus scan. Sets s_bno085_detected when 0x4A/0x4B ACKs.
+	 * Logs every address that responds — valuable when the sensor on the
+	 * bus changes (MPU6050 at 0x68, BNO085 at 0x4A/0x4B, etc.). */
+#if DT_NODE_EXISTS(DT_NODELABEL(i2c1))
+	imu_i2c_scan_bus(DEVICE_DT_GET(DT_NODELABEL(i2c1)), "I2C1");
+#endif
+
+	/* ============================================================ *
+	 * Production backend: BNO085 (fused rotation vector via SHTP).
+	 * ============================================================ */
+	if (s_bno085_detected) {
+		int rc = bno085_init();
+		if (rc != 0) {
+			imu_available = false;
+			LOG_ERR("[IMU] bno085_init failed rc=%d (imu_available=0)", rc);
+			return rc;
+		}
+		imu_available = true;
+		LOG_INF("[IMU] init ok (backend=BNO085 @ 0x%02X) — quat feed from Rotation Vector",
+			BNO085_I2C_ADDR);
+		return 0;
+	}
+
+	/* ============================================================ *
+	 * Legacy backend: MPU6050 raw + Madgwick (retained for
+	 * reversibility; inactive while a BNO085 is present on I2C1).
+	 * ============================================================ */
 #if DT_NODE_EXISTS(MPU6050_NODE)
 	int whoami_rc = -1;
 	uint8_t whoami_val = 0;
 
-	/* Bus recovery: evita bus locked dopo flash/reset software */
-	imu_i2c_bus_recovery();
-
-	/* Dopo recovery: riprova presenza sensore via WHO_AM_I su I2C1.
-	 * Nota: se il driver Zephyr MPU6050 ha fallito init al boot, device_is_ready(mpu6050_dev)
-	 * può restare a 0; però dopo recovery il bus può tornare operativo.
-	 */
 #if DT_NODE_EXISTS(DT_NODELABEL(i2c1))
 	{
 		const struct device *i2c1_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
@@ -410,25 +483,21 @@ int imu_init(void)
 			LOG_ERR("[IMU] init failed: WHO_AM_I read failed (r=%d who=0x%02x) (imu_available=0)", r, who);
 			return -EIO;
 		}
-
-		/* Bus e sensore rispondono: abilita IMU anche se device_is_ready(mpu6050_dev) è false. */
 		imu_available = true;
 	}
 #endif
 
-	/* Probe bus I2C per capire se il sensore risponde (diagnostica merge/reg/address). */
 	imu_i2c_probe_log();
 
 	LOG_INF("[IMU_INIT] mpu6050_dev ready=%d imu_available=%d whoami=0x%02X i2c_reg_read_rc=%d",
 		device_is_ready(mpu6050_dev) ? 1 : 0, imu_available ? 1 : 0, whoami_val, whoami_rc);
 
 	if (!device_is_ready(mpu6050_dev)) {
-		/* Se WHO_AM_I è ok ma il driver non è "ready", tentiamo comunque le read runtime. */
 		LOG_WRN("[IMU] MPU6050 device not ready (driver init failed at boot?) — continuing due to WHO_AM_I ok");
 	}
 
 	if (imu_available) {
-		LOG_INF("[IMU] init ok: device_is_ready=%d (imu_available=1)",
+		LOG_INF("[IMU] init ok (backend=MPU6050): device_is_ready=%d",
 			device_is_ready(mpu6050_dev) ? 1 : 0);
 	}
 
@@ -438,24 +507,11 @@ int imu_init(void)
 		LOG_INF("[IMU_INIT] sensor_sample_fetch accel_rc=%d gyro_rc=%d", acc_rc, gyro_rc);
 	}
 
-	/* L'orientamento diventa "valido" solo dopo il primo update Madgwick con campioni ok */
-	g_imu_orientation_valid = false;
-	g_imu_sample_counter = 0;
-
-	/* Reset quaternione stimato */
-	g_imu_quat.w = 1.0f;
-	g_imu_quat.x = 0.0f;
-	g_imu_quat.y = 0.0f;
-	g_imu_quat.z = 0.0f;
-
-	/* Calibrazione bias giroscopio a sensore fermo (~1.25 s).
-	 * Da eseguire con robot immobile durante il boot. */
 	imu_calibrate_gyro_bias();
-
 	return 0;
 #else
-	LOG_WRN("MPU6050 not configured in device tree");
-	LOG_WRN("[IMU] init failed: MPU6050_NODE missing (imu_available=0)");
+	LOG_ERR("[IMU] no supported IMU detected on I2C1 (no BNO085 and no MPU6050 DT node) — imu_available=0");
+	imu_available = false;
 	return -ENODEV;
 #endif
 }
@@ -553,99 +609,103 @@ void imu_clear_orientation_state(void)
 	g_imu_sample_counter = 0;
 }
 
+/* ------------------------------------------------------------------------- *
+ * imu_update_orientation — production body (BNO085 backend).
+ *
+ * Called at 400 Hz by the IMU thread. BNO085 emits Rotation Vector reports
+ * natively at ~100 Hz, so roughly 3 of every 4 calls return no new data —
+ * those early-exit without re-publishing, and the snapshot stays valid from
+ * the previous publish (downstream continues reading the last fresh quat).
+ *
+ * imu_snapshot_t mapping in BNO085 v1:
+ *   quat_*        = Rotation Vector (unit quaternion, from SH-2 sensor 0x05)
+ *   zworld_*      = derived from quat (same formula as legacy)
+ *   sample_counter/timestamp_us = advanced on each new packet
+ *   accel_*, gyro_*, temp, wrist_*_rate = zeroed (see BNO085-v1 note below)
+ *
+ * BNO085-v1 temporary limitation: only Rotation Vector is enabled on the
+ * sensor; raw accel/gyro/temp and wrist rates are not yet plumbed. Consumers
+ * that only read quat_* + zworld_* + sample_counter + timestamp_us are
+ * unaffected (this is the SPI telemetry, ws_handlers_imu, dashboard IMU view,
+ * VR head-tracking path — verified from current repo grep). If a consumer
+ * starts using accel/gyro, Phase 6 will enable Calibrated Accel (sensor 0x01)
+ * + Calibrated Gyro (sensor 0x02) on the BNO085 and populate those fields.
+ * ------------------------------------------------------------------------- */
 void imu_update_orientation(float dt_s)
 {
-	struct imu_data d;
+	ARG_UNUSED(dt_s); /* BNO085 is fused internally; Madgwick's dt no longer used */
 
-	if (dt_s <= 0.0f)
-	{
-		return;
-	}
-
-	const int rd = imu_read(&d);
-	if (rd != 0)
-	{
+	if (!imu_available) {
 		g_imu_orientation_valid = false;
 		return;
 	}
 
-	/* Normalizzazione accel (da m/s^2 a vettore unitario). Nessun reject su [25,225]:
-	 * ripristino comportamento stabile (Madgwick aggiornato se imu_read ok e norm > 1e-6). */
-	float ax = d.accel_x;
-	float ay = d.accel_y;
-	float az = d.accel_z;
-
-	const float norm = sqrtf(ax * ax + ay * ay + az * az);
-	if (norm > 1e-6f)
-	{
-		ax /= norm;
-		ay /= norm;
-		az /= norm;
-	}
-	else
-	{
-		g_imu_orientation_valid = false;
+	float qw = 1.0f, qx = 0.0f, qy = 0.0f, qz = 0.0f;
+	uint8_t accuracy = 0;
+	const int r = bno085_poll_quat(&qw, &qx, &qy, &qz, &accuracy);
+	if (r <= 0) {
+		/* No new Rotation Vector report this tick (r==0 = empty queue;
+		 * r<0 = transient I/O error). Keep the last published snapshot
+		 * valid: returning without touching g_imu_orientation_valid
+		 * preserves it if it was already true, and returning without
+		 * re-publishing keeps the existing active buffer in place. */
 		return;
 	}
 
-	/* Gyro già in rad/s dal driver; sottrae il bias calibrato all'avvio */
-	const float gx = d.gyro_x - g_gyro_bias_x;
-	const float gy = d.gyro_y - g_gyro_bias_y;
-	const float gz = d.gyro_z - g_gyro_bias_z;
-
-	/* Beta adattivo: riduce il rumore quando il robot è fermo,
-	 * mantiene la risposta rapida durante il movimento. */
-	{
-		const float gyro_norm = sqrtf(gx * gx + gy * gy + gz * gz);
-		if (gyro_norm <= BETA_GYRO_LOW) {
-			g_madgwick_beta = BETA_STILL;
-		} else if (gyro_norm >= BETA_GYRO_HIGH) {
-			g_madgwick_beta = BETA_MOVING;
-		} else {
-			/* Interpolazione lineare nella zona di transizione */
-			const float t = (gyro_norm - BETA_GYRO_LOW) / (BETA_GYRO_HIGH - BETA_GYRO_LOW);
-			g_madgwick_beta = BETA_STILL + t * (BETA_MOVING - BETA_STILL);
-		}
-	}
-
-	g_last_gyro_x = gx;
-	g_last_gyro_y = gy;
-	g_last_gyro_z = gz;
-	madgwick_update(dt_s, gx, gy, gz, ax, ay, az);
+	/* Sync the legacy g_imu_quat (imu_get_quaternion reads it for consumers
+	 * that don't use imu_get_snapshot). */
+	g_imu_quat.w = qw;
+	g_imu_quat.x = qx;
+	g_imu_quat.y = qy;
+	g_imu_quat.z = qz;
 	g_imu_orientation_valid = true;
 
-	/* Double-buffer writer: costruisce snapshot nel buffer inattivo, poi flip atomico.
-	 * Il reader legge sempre il buffer "attivo" senza retry né lock. */
+	/* Double-buffer writer: fill the inactive buffer, then atomic flip. */
 	uint32_t cur = (uint32_t)atomic_get(&g_imu_active_idx);
 	uint32_t next = cur ^ 1U;
 
 	imu_snapshot_t *dst = &g_imu_buffers[next];
 	const uint32_t sample_counter = ++g_imu_sample_counter;
 	const uint32_t timestamp_us = (uint32_t)k_cyc_to_us_floor32(k_cycle_get_32());
-	dst->accel_x = d.accel_x;
-	dst->accel_y = d.accel_y;
-	dst->accel_z = d.accel_z;
-	dst->gyro_x  = d.gyro_x;
-	dst->gyro_y  = d.gyro_y;
-	dst->gyro_z  = d.gyro_z;
-	dst->temp    = d.temp;
-	dst->quat_w  = g_imu_quat.w;
-	dst->quat_x  = g_imu_quat.x;
-	dst->quat_y  = g_imu_quat.y;
-	dst->quat_z  = g_imu_quat.z;
-	dst->zworld_x = 2.0f * (g_imu_quat.w * g_imu_quat.y + g_imu_quat.x * g_imu_quat.z);
-	dst->zworld_y = 2.0f * (g_imu_quat.y * g_imu_quat.z - g_imu_quat.w * g_imu_quat.x);
-	dst->zworld_z = g_imu_quat.w * g_imu_quat.w - g_imu_quat.x * g_imu_quat.x
-		- g_imu_quat.y * g_imu_quat.y + g_imu_quat.z * g_imu_quat.z;
-	dst->wrist_roll_rate  = g_last_gyro_z;
-	dst->wrist_pitch_rate = g_last_gyro_y;
-	dst->wrist_yaw_rate   = g_last_gyro_x;
+
+	/* BNO085-v1: raw IMU fields not yet enabled on the sensor. */
+	dst->accel_x = 0.0f;
+	dst->accel_y = 0.0f;
+	dst->accel_z = 0.0f;
+	dst->gyro_x  = 0.0f;
+	dst->gyro_y  = 0.0f;
+	dst->gyro_z  = 0.0f;
+	dst->temp    = 0.0f;
+
+	dst->quat_w  = qw;
+	dst->quat_x  = qx;
+	dst->quat_y  = qy;
+	dst->quat_z  = qz;
+	dst->zworld_x = 2.0f * (qw * qy + qx * qz);
+	dst->zworld_y = 2.0f * (qy * qz - qw * qx);
+	dst->zworld_z = qw * qw - qx * qx - qy * qy + qz * qz;
+
+	/* BNO085-v1: wrist rates derived from raw gyro — zeroed until Phase 6
+	 * enables Calibrated Gyro on the sensor. */
+	dst->wrist_roll_rate  = 0.0f;
+	dst->wrist_pitch_rate = 0.0f;
+	dst->wrist_yaw_rate   = 0.0f;
+
 	dst->sample_counter = sample_counter;
 	dst->timestamp_us = timestamp_us;
 
-	/* Flip atomico: dopo questa istruzione tutti i nuovi reader vedono il buffer aggiornato */
 	atomic_set(&g_imu_active_idx, (atomic_val_t)next);
 	g_imu_has_valid_snapshot = true;
+
+	/* Observability: log BNO085 Rotation-Vector accuracy (0..3) on change so
+	 * magnetometer-calibration state is visible on COM3. No SPI/WS effect. */
+	{
+		static uint8_t s_last_bno085_acc = 0xFF;
+		if (accuracy != s_last_bno085_acc) {
+			LOG_INF("[IMU] BNO085 accuracy=%u", (unsigned)accuracy);
+			s_last_bno085_acc = accuracy;
+		}
+	}
 }
 
 void imu_get_quaternion(struct imu_quat *out)

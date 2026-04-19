@@ -71,6 +71,41 @@ def _mount_rotation_from_config(cfg: dict[str, Any]) -> R:
     raise RuntimeError("[imu_ee_mount] schema non valido: richiesto quat_wxyz[4] oppure rpy_deg[3]")
 
 
+def _world_bias_rotation() -> R:
+    """Return the BNO085 world-frame yaw-reference bias as a Rotation.
+
+    Physical-measurement model used by the validation / analytics layer only:
+        R_imu = R_world_bias · R_ee · R_mount
+    where R_world_bias absorbs the BNO085 Rotation-Vector's magnetometer-derived
+    yaw reference (which drifts with magnetometer state), and R_mount is the
+    purely mechanical chip-to-EE rigid offset.
+
+    Backward-compatible: if `config_runtime/imu/imu_world_bias.json` is absent
+    or malformed, this returns the IDENTITY rotation. Validators then collapse
+    back to the historical single-rotation model `R_imu = R_ee · R_mount`.
+
+    This function is deliberately confined to the validation path. Operational
+    teleop / VR / WS / SPI / firmware code does NOT consult this file.
+    """
+    try:
+        cfg = rcfg.load_runtime_json("imu_world_bias", default=None)
+    except Exception:
+        return R.identity()
+    if not isinstance(cfg, dict):
+        return R.identity()
+    try:
+        rcfg.validate_imu_world_bias_shape(cfg)
+    except Exception:
+        return R.identity()
+    if isinstance(cfg.get("quat_wxyz"), list) and len(cfg["quat_wxyz"]) == 4:
+        q_xyzw = _quat_wxyz_to_xyzw([float(v) for v in cfg["quat_wxyz"]])
+        return R.from_quat(q_xyzw)
+    if isinstance(cfg.get("rpy_deg"), list) and len(cfg["rpy_deg"]) == 3:
+        r, p, y = [float(v) for v in cfg["rpy_deg"]]
+        return R.from_euler("ZYX", [y, p, r], degrees=True)
+    return R.identity()
+
+
 def _extract_joint_physical_deg(msg: dict[str, Any]) -> list[float] | None:
     keys = ("servo_deg_B", "servo_deg_S", "servo_deg_G", "servo_deg_Y", "servo_deg_P", "servo_deg_R")
     if any(k not in msg for k in keys):
@@ -122,6 +157,7 @@ async def run(args: argparse.Namespace) -> tuple[list[Sample], dict[str, Any]]:
     dirs = cfg.get("dirs", settings_manager.DEFAULTS.get("dirs", [1, 1, 1, 1, 1, 1]))
     if bool(args.ignore_mount):
         r_mount = R.identity()
+        r_world_bias = R.identity()
     else:
         mount_path = Path(args.mount_config).resolve()
         runtime_mount_path = Path(rcfg.get_runtime_config_path("imu_ee_mount")).resolve()
@@ -136,6 +172,8 @@ async def run(args: argparse.Namespace) -> tuple[list[Sample], dict[str, Any]]:
                 raise RuntimeError(f"[imu_ee_mount] errore parsing JSON: {mount_path}: {e}") from e
             rcfg.validate_imu_ee_mount_shape(mount_cfg)
         r_mount = _mount_rotation_from_config(mount_cfg)
+        # Optional world-bias rotation (identity if runtime config absent → backward-compatible).
+        r_world_bias = _world_bias_rotation()
 
     ssl_ctx = None
     if args.url.startswith("wss://"):
@@ -170,7 +208,7 @@ async def run(args: argparse.Namespace) -> tuple[list[Sample], dict[str, Any]]:
 
             r_ee = _ee_rotation_from_servo_physical_deg(servo, offsets, dirs)
             r_meas_imu = R.from_quat(q_imu_xyzw)
-            r_pred_imu = r_ee * r_mount
+            r_pred_imu = r_world_bias * r_ee * r_mount
 
             q_err_xyzw, theta, yaw_e, pitch_e, roll_e = _error_metrics(r_pred_imu, r_meas_imu)
             if bool(args.compare_identity) and not bool(args.ignore_mount):

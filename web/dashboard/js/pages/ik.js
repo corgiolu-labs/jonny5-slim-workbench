@@ -39,25 +39,37 @@ const IK_COMPARE_FIELDS = [
 const IK_COMPARE_CARD_META = {
   target: {
     className: "target",
-    title: "Target inviato",
-    note: "Ultima posa cartesiana inviata alla IK",
+    title: "🎯 Posa teorica (IK)",
+    note: "Dove il robot dovrebbe trovarsi",
   },
-  fk: {
-    className: "fk",
-    title: "FK live",
-    note: "Ricostruita dai giunti correnti del robot",
+  real: {
+    className: "real",
+    title: "🤖 Posa reale (IMU)",
+    note: "Dove il robot si trova davvero",
   },
-  imu: {
-    className: "imu",
-    title: "IMU estimate",
-    note: "Stima short-term ancorata al wrist-center",
-  },
-  delta: {
-    className: "delta",
-    title: "Errore target - IMU",
-    note: "Tende a zero quando l'IMU si avvicina al target",
+  error: {
+    className: "error",
+    title: "⚠️ Errore di posa",
+    note: "Δ = reale − teorica",
   },
 };
+
+// Soglie per colorare / qualificare l'errore nel card "Errore di posa".
+// Le soglie sono applicate per asse (e alla norma cumulativa) e sono quelle
+// indicate per la presentazione tesi:
+//   posizione  < 5 mm  verde   < 20 mm  giallo   ≥ 20 mm  rosso
+//   angoli     < 2°    verde   < 8°     giallo   ≥ 8°     rosso
+const ERROR_POS_GREEN_MM = 5;
+const ERROR_POS_YELLOW_MM = 20;
+const ERROR_ROT_GREEN_DEG = 2;
+const ERROR_ROT_YELLOW_DEG = 8;
+
+function _errorLevel(absVal, greenThr, yellowThr) {
+  if (!Number.isFinite(absVal)) return "idle";
+  if (absVal < greenThr) return "green";
+  if (absVal < yellowThr) return "yellow";
+  return "red";
+}
 const IMU_GRAVITY_MPS2 = 9.80665;
 const IMU_ACCEL_DEADBAND_MPS2 = 0.18;
 const IMU_STILL_GYRO_RAD_S = 0.12;
@@ -66,6 +78,50 @@ const IMU_ACTIVE_DAMP = 0.985;
 const IMU_STILL_DAMP = 0.42;
 const IMU_MAX_SPEED_MPS = 0.45;
 const TOOL_OFFSET_M = [0.06, 0.0, 0.0];
+
+/**
+ * IMU → base-frame rotation calibration (read-only from backend).
+ *
+ * Physical model identical to the analytics validators
+ * (raspberry/controller/imu_analytics/validate_imu_vs_ee.py):
+ *
+ *     R_imu = R_world_bias · R_ee · R_mount
+ *
+ *   - R_mount       : mechanical IMU-chip-to-EE rigid offset (roll/pitch,
+ *                     yaw forced to 0)
+ *   - R_world_bias  : BNO085 Rotation-Vector yaw reference offset
+ *                     (magnetic-north → robot base yaw alignment)
+ *   - R_ee          : end-effector (tool) orientation in robot base frame
+ *                     — the same space FK live and target IK use.
+ *
+ * Inverting for observability:
+ *
+ *     R_ee = R_world_bias^-1 · R_imu · R_mount^-1
+ *
+ * That is the rotation we display in the IMU card, and the one we apply to
+ * TOOL_OFFSET to position the IMU-derived tool-tip in base frame.
+ *
+ * Defaults: identity quaternions. If /api/imu-frame-calib is absent, or the
+ * JSON configs are missing on the Pi, this collapses to R_ee ≡ R_imu so the
+ * previous behavior is preserved (no regression for unconfigured rigs).
+ */
+const IDENTITY_QUAT_WXYZ = { w: 1, x: 0, y: 0, z: 0 };
+let _imuFrameCalib = {
+  mountQuat: { ...IDENTITY_QUAT_WXYZ },      // R_mount
+  worldBiasQuat: { ...IDENTITY_QUAT_WXYZ },  // R_world_bias
+  // R_home = q_observed_home ⊗ q_fk_home_conj — capturato con "Azzera IMU @ HOME".
+  // Optional: se imu_home_ref.json è assente → identity → comportamento pre-fix.
+  homeQuat: { ...IDENTITY_QUAT_WXYZ },
+  mountPresent: false,
+  worldBiasPresent: false,
+  homePresent: false,
+  homeCalibratedAt: null,
+  loaded: false,
+};
+
+// Ultima telemetria valida ricevuta — usata al click "Azzera IMU @ HOME"
+// per catturare q_imu e fk_live quat al momento del click (senza ulteriore WS).
+let _lastTelemetryForZero = null;
 
 /** Finestra stabilizzazione dopo SETPOSE_DONE (o fallback timeout) prima del prime. */
 const IK_COMPARE_SETTLE_MS = 300;
@@ -115,6 +171,15 @@ const MAX_ORI_ERROR_DEFAULT = 10.0;
 // Settings ricevuti dal server (vel_max e profilo per SETPOSE)
 let _ikVel     = 40;
 let _ikProfile = "RTR5";
+
+// Unified "Invia posa IK": se true, il prossimo ik_result reachable
+// triggera automaticamente SETPOSE. Cleared dopo l'auto-send o su fail.
+let _ikAutoSendPending = false;
+
+// Angoli giunto della Sezione 1 al momento di "Calcola FK" — usati come
+// riferimento per il verdict "round-trip FK→IK" nella Sezione 3 (confronta
+// con gli angoli ricostruiti dall'IK solver sulla posa FK).
+let _roundTripInputJoints = null;  // [b, s, g, y, p, r] in gradi virtuali
 let _ikCompare = {
   activeTarget: null,
   targetSentAtMs: 0,
@@ -130,6 +195,10 @@ let _ikCompare = {
   lastImuSampleCounter: null,
   lastImuRateHz: null,
   lastImuValid: false,
+  // True quando la telemetria IMU pubblica accel_raw (integratore inerziale
+  // possibile). False con BNO085 v1 (solo Rotation Vector) → usiamo FK wc
+  // come ancora e l'IMU solo per orientazione, evitando il drift di -g.
+  imuAccelRawAvailable: false,
 };
 
 /** Ultimo POE ricevuto dal backend (source of truth). */
@@ -362,6 +431,211 @@ function _vecNorm(v) {
   return Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 }
 
+// Hamilton product (q1 ⊗ q2) with wxyz convention. Order matters: returns
+// the rotation "first apply q2, then apply q1" (same semantics as
+// Rotation.__mul__ in scipy).
+function _quatMul(q1, q2) {
+  return {
+    w: q1.w * q2.w - q1.x * q2.x - q1.y * q2.y - q1.z * q2.z,
+    x: q1.w * q2.x + q1.x * q2.w + q1.y * q2.z - q1.z * q2.y,
+    y: q1.w * q2.y - q1.x * q2.z + q1.y * q2.w + q1.z * q2.x,
+    z: q1.w * q2.z + q1.x * q2.y - q1.y * q2.x + q1.z * q2.w,
+  };
+}
+
+// Inverse of a unit quaternion = conjugate. We renormalize defensively to
+// tolerate mild precision drift in the incoming configs.
+function _quatConj(q) {
+  const n = Math.hypot(q.w, q.x, q.y, q.z) || 1;
+  return { w: q.w / n, x: -q.x / n, y: -q.y / n, z: -q.z / n };
+}
+
+// Compose q_ee_base (no-home, pipeline "nuda"):
+//   q_noHome = q_world_bias^-1 ⊗ q_imu ⊗ q_mount^-1
+// Ritorna l'osservazione IMU portata in base frame secondo il solo modello
+// del validator. Usata internamente da _imuQuatToBaseFrame e dal capture
+// "Azzera IMU @ HOME" — che deve calcolare l'offset q_home INDIPENDENTE-
+// MENTE dal q_home corrente (altrimenti la zeroing sarebbe ricorsiva).
+function _imuQuatToBaseFrameNoHome(qImuWxyz) {
+  const qMountInv = _quatConj(_imuFrameCalib.mountQuat);
+  const qWorldBiasInv = _quatConj(_imuFrameCalib.worldBiasQuat);
+  return _quatMul(_quatMul(qWorldBiasInv, qImuWxyz), qMountInv);
+}
+
+// Versione completa (incl. R_home) usata dal compare-pipeline a runtime:
+//   q_ee_base = q_home^-1 ⊗ q_world_bias^-1 ⊗ q_imu ⊗ q_mount^-1
+// Se imu_home_ref.json è assente → homeQuat = identity → fall-back al
+// comportamento pre-zero (backward-compatible: nessuna correzione).
+function _imuQuatToBaseFrame(qImuWxyz) {
+  const qNoHome = _imuQuatToBaseFrameNoHome(qImuWxyz);
+  const qHomeInv = _quatConj(_imuFrameCalib.homeQuat);
+  return _quatMul(qHomeInv, qNoHome);
+}
+
+async function _loadImuFrameCalib() {
+  try {
+    const res = await fetch("/api/imu-frame-calib", { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const parse = (slot) => {
+      const q = slot?.quat_wxyz;
+      if (!Array.isArray(q) || q.length !== 4) return null;
+      const nums = q.map(Number);
+      if (nums.some((v) => !Number.isFinite(v))) return null;
+      const n = Math.hypot(...nums) || 1;
+      return { w: nums[0] / n, x: nums[1] / n, y: nums[2] / n, z: nums[3] / n };
+    };
+    const mount = parse(data?.mount);
+    const worldBias = parse(data?.world_bias);
+    const home = parse(data?.home);
+    if (mount) _imuFrameCalib.mountQuat = mount;
+    if (worldBias) _imuFrameCalib.worldBiasQuat = worldBias;
+    if (home) _imuFrameCalib.homeQuat = home;
+    else _imuFrameCalib.homeQuat = { ...IDENTITY_QUAT_WXYZ };  // reset se rimosso
+    _imuFrameCalib.mountPresent = !!data?.mount?.present;
+    _imuFrameCalib.worldBiasPresent = !!data?.world_bias?.present;
+    _imuFrameCalib.homePresent = !!data?.home?.present;
+    _imuFrameCalib.homeCalibratedAt = data?.home?.calibrated_at || null;
+    _imuFrameCalib.loaded = true;
+    const dm = _imuFrameCalib.mountPresent ? "configured" : "identity";
+    const db = _imuFrameCalib.worldBiasPresent ? "configured" : "identity";
+    const dh = _imuFrameCalib.homePresent ? `configured (${_imuFrameCalib.homeCalibratedAt || "?"})` : "identity (non settato)";
+    addLog(`IMU frame calib: mount=${dm}, world_bias=${db}, home=${dh}`);
+    _updateZeroHomeStatusLabel();
+  } catch (e) {
+    _imuFrameCalib.loaded = false;
+    addLog(`⚠ IMU frame calib non disponibile: compare IMU in IMU-world frame (${String(e)})`);
+  }
+}
+
+/** Aggiorna l'etichetta dello status "Zero @ HOME attivo / non settato". */
+function _updateZeroHomeStatusLabel() {
+  const el = document.getElementById("zero-home-status");
+  if (!el) return;
+  if (_imuFrameCalib.homePresent) {
+    el.innerHTML = `<span class="state-dot state-dot-on">●</span> Zero-at-HOME attivo${_imuFrameCalib.homeCalibratedAt ? ` · ${_imuFrameCalib.homeCalibratedAt}` : ""}`;
+  } else {
+    el.innerHTML = `<span class="state-dot state-dot-off">●</span> Zero-at-HOME non impostato (pipeline nuda)`;
+  }
+}
+
+/**
+ * Cattura lo snapshot IMU+FK al click e salva q_home_ref = q_observed · q_fk_conj.
+ * Formula: al momento T (robot fermo a HOME):
+ *    q_observed(T) = q_wb^-1 ⊗ q_imu(T) ⊗ q_mount^-1        (NO home chain)
+ *    q_fk(T)       = fk_live_quat del robot a HOME
+ *    q_home_ref    = q_observed(T) ⊗ q_fk(T)^-1
+ * Il runtime usa q_ee = q_home_ref^-1 ⊗ q_observed, che a HOME ridà q_fk(T)
+ * e — sotto l'ipotesi di drift costante (solo yaw mag) — ridà q_fk per
+ * qualsiasi altra posa.
+ */
+async function _captureAndSaveHomeRef() {
+  const btn = document.getElementById("btn-zero-at-home");
+  const msg = _lastTelemetryForZero;
+  if (!msg) {
+    addLog("✗ Zero-at-HOME: nessuna telemetria disponibile. Aspetta un frame IMU e riprova.");
+    return;
+  }
+  if (msg.imu_valid !== true || msg.fk_live_valid !== true) {
+    addLog("✗ Zero-at-HOME: IMU o FK live non validi. Robot in moto? Riprova fermo.");
+    return;
+  }
+  // Soft-check: robot near HOME. L'EE a HOME del modello POE ha orientazione
+  // identity (yaw=pitch=roll=0); se l'utente ha premuto HOME, FK dovrebbe
+  // riportarlo. Tolleranza ampia (5°) per assorbire settling servo.
+  const yaw   = Number(msg.fk_live_yaw);
+  const pitch = Number(msg.fk_live_pitch);
+  const roll  = Number(msg.fk_live_roll);
+  if (![yaw, pitch, roll].every(Number.isFinite)) {
+    addLog("✗ Zero-at-HOME: FK pose incompleta.");
+    return;
+  }
+  if (Math.abs(yaw) > 5 || Math.abs(pitch) > 5 || Math.abs(roll) > 5) {
+    if (!confirm(`Il robot NON sembra a HOME (FK YPR = ${yaw.toFixed(1)}°, ${pitch.toFixed(1)}°, ${roll.toFixed(1)}°). Procedere comunque?`)) {
+      addLog("⌫ Zero-at-HOME annullato dall'utente");
+      return;
+    }
+  }
+
+  // q_observed (NO home chain)
+  const qImu = _extractImuQuat(msg);
+  if (!qImu) { addLog("✗ Zero-at-HOME: quaternion IMU mancante"); return; }
+  const qObs = _imuQuatToBaseFrameNoHome(qImu);
+
+  // q_fk live
+  const qFk = {
+    w: Number(msg.fk_live_quat_w),
+    x: Number(msg.fk_live_quat_x),
+    y: Number(msg.fk_live_quat_y),
+    z: Number(msg.fk_live_quat_z),
+  };
+  if (![qFk.w, qFk.x, qFk.y, qFk.z].every(Number.isFinite)) {
+    addLog("✗ Zero-at-HOME: fk_live_quat mancante");
+    return;
+  }
+  // Normalize to be safe.
+  const fn = Math.hypot(qFk.w, qFk.x, qFk.y, qFk.z) || 1;
+  const qFkN = { w: qFk.w/fn, x: qFk.x/fn, y: qFk.y/fn, z: qFk.z/fn };
+
+  // q_home_ref = q_obs ⊗ q_fk^-1
+  const qHomeRef = _quatMul(qObs, _quatConj(qFkN));
+
+  const payload = {
+    quat_wxyz: [qHomeRef.w, qHomeRef.x, qHomeRef.y, qHomeRef.z],
+    calibrated_at: new Date().toISOString(),
+    fk_pose_mm: [
+      Number(msg.fk_live_x_mm), Number(msg.fk_live_y_mm), Number(msg.fk_live_z_mm),
+      yaw, pitch, roll,
+    ],
+    note: "Captured via FK/IK dashboard · observability-layer zero",
+  };
+
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/imu-home-ref", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data?.error || `HTTP ${res.status}`);
+    }
+    addLog(`✓ Zero-at-HOME salvato (${data.path})`);
+    await _loadImuFrameCalib();
+    renderIkCompare();
+  } catch (e) {
+    addLog(`✗ Zero-at-HOME errore: ${String(e)}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _resetHomeRef() {
+  if (!confirm("Rimuovere la correzione Zero-at-HOME? (torna al comportamento senza zero)")) return;
+  const btn = document.getElementById("btn-reset-zero-home");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/imu-home-ref/clear", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+    addLog(`✓ Zero-at-HOME rimosso (removed=${data.removed})`);
+    await _loadImuFrameCalib();
+    renderIkCompare();
+  } catch (e) {
+    addLog(`✗ Reset Zero-at-HOME errore: ${String(e)}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function initZeroAtHomeButtons() {
+  const btn = document.getElementById("btn-zero-at-home");
+  const rst = document.getElementById("btn-reset-zero-home");
+  if (btn) btn.addEventListener("click", _captureAndSaveHomeRef);
+  if (rst) rst.addEventListener("click", _resetHomeRef);
+}
+
 function _quatWxyzToMatrix3(w, x, y, z) {
   const n = Math.hypot(w, x, y, z) || 1;
   const qw = w / n;
@@ -394,9 +668,16 @@ function _matVecMul3(m, v) {
 
 function _buildImuEstimatePose(wcPosM, quat) {
   if (!Array.isArray(wcPosM) || wcPosM.length !== 3 || !quat) return null;
-  const rot = _quatWxyzToMatrix3(quat.w, quat.x, quat.y, quat.z);
+  // Transform the raw IMU quaternion (in BNO085 world frame) into the robot
+  // base frame using the same R_world_bias · R_ee · R_mount model the
+  // analytics validators apply. Result qBase is R_ee_from_imu expressed in
+  // base coordinates — geometrically comparable to FK live and target IK.
+  // If neither mount nor world_bias were loaded, qBase == quat exactly
+  // (identity composition), preserving the previous display.
+  const qBase = _imuQuatToBaseFrame(quat);
+  const rot = _quatWxyzToMatrix3(qBase.w, qBase.x, qBase.y, qBase.z);
   const toolPosM = _vecAdd(wcPosM, _matVecMul3(rot, TOOL_OFFSET_M));
-  const euler = quatToEuler(quat.w, quat.x, quat.y, quat.z);
+  const euler = quatToEuler(qBase.w, qBase.x, qBase.y, qBase.z);
   const pose = {
     x: toolPosM[0] * 1000.0,
     y: toolPosM[1] * 1000.0,
@@ -469,28 +750,53 @@ function buildCompareGrid() {
   const grid = document.getElementById("ik-compare-grid");
   if (!grid) return;
   grid.innerHTML = "";
-  for (const [cardKey, meta] of Object.entries(IK_COMPARE_CARD_META)) {
+
+  // Layout thesis-ready: due card affiancate (Target | Reale) + una card
+  // full-width sotto (Errore). I tre id di card restano quelli già usati
+  // dal resto del codice: "target", "real", "error".
+  const topRow = document.createElement("div");
+  topRow.className = "ik-compare-row-top";
+
+  const buildCard = (cardKey) => {
+    const meta = IK_COMPARE_CARD_META[cardKey];
     const card = document.createElement("div");
     card.className = `ik-compare-card ${meta.className}`;
+    // L'errore ha, sotto i 6 numeri, una riga riassuntiva con pallino
+    // tri-stato + norma posizione + norma orientazione. Viene popolata
+    // dinamicamente in renderIkCompare.
+    const footer = cardKey === "error"
+      ? `<div class="ik-error-summary" id="cmp-error-summary">
+           <span class="ik-error-dot" id="cmp-error-dot">●</span>
+           <span class="ik-error-norm" id="cmp-error-norm-pos">Errore posizione: —</span>
+           <span class="ik-error-norm" id="cmp-error-norm-rot">Errore orientazione: —</span>
+         </div>`
+      : "";
     card.innerHTML = `
       <div class="ik-compare-card-title">
         <h3>${meta.title}</h3>
         <span id="cmp-meta-${cardKey}">${meta.note}</span>
       </div>
       <div class="ik-num-grid" id="cmp-grid-${cardKey}"></div>
+      ${footer}
     `;
     const inner = card.querySelector(`#cmp-grid-${cardKey}`);
     IK_COMPARE_FIELDS.forEach((field) => {
+      const labelPrefix = cardKey === "error" ? "Δ" : "";
       const cell = document.createElement("div");
       cell.className = "ik-value-cell out-pose";
       cell.innerHTML = `
-        <div class="cell-label">${field.label} <span class="short">${field.unit}</span></div>
+        <div class="cell-label">${labelPrefix}${field.label} <span class="short">${field.unit}</span></div>
         <div class="cell-value" id="cmp-${cardKey}-${field.key}">—</div>
       `;
       inner.appendChild(cell);
     });
-    grid.appendChild(card);
-  }
+    return card;
+  };
+
+  topRow.appendChild(buildCard("target"));
+  topRow.appendChild(buildCard("real"));
+  grid.appendChild(topRow);
+  grid.appendChild(buildCard("error"));
 }
 
 function _setCompareMeta(cardKey, text) {
@@ -506,6 +812,232 @@ function _renderComparePose(cardKey, pose) {
   });
 }
 
+/**
+ * Popola le 6 celle della Sezione 3 con gli angoli ricostruiti dall'IK.
+ * angles è null se l'IK è fallita → mostra "—".
+ */
+function _renderRecoveredJoints(angles) {
+  const ids = ["ik-rec-base", "ik-rec-spalla", "ik-rec-gomito", "ik-rec-yaw", "ik-rec-pitch", "ik-rec-roll"];
+  ids.forEach((id, i) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (!Array.isArray(angles) || !Number.isFinite(Number(angles[i]))) {
+      el.textContent = "—";
+    } else {
+      el.textContent = `${Number(angles[i]).toFixed(1)}°`;
+    }
+  });
+}
+
+/**
+ * Calcola e mostra il verdict "round-trip FK→IK":
+ *   max |input_joint - recovered_joint| su 6 giunti
+ * Soglie: <1° ALLINEATO, <3° ENTRO TOLLERANZA, ≥3° SCOSTAMENTO.
+ * Aggiorna: pallino, max, meta solver, verdict line.
+ */
+function _updateRoundTripVerdict(recovered, meta) {
+  const input = _roundTripInputJoints;
+  const maxEl = document.getElementById("ik-round-max");
+  const metaEl = document.getElementById("ik-round-meta");
+  const dotEl = document.getElementById("ik-round-dot");
+  const verdictWrap = document.getElementById("ik-round-verdict");
+  const verdictVal = document.getElementById("ik-round-verdict-value");
+  const statusEl = document.getElementById("ik-round-status");
+
+  if (!Array.isArray(recovered) || recovered.length !== 6 || !Array.isArray(input) || input.length !== 6) {
+    if (maxEl) maxEl.textContent = "Max scostamento: —";
+    if (metaEl && meta) metaEl.innerHTML = `Solver: ${meta.solver || "—"} · Iter: ${meta.iterations ?? "—"} · <span id="ik-elapsed-ms">${meta.elapsedMs ?? "-"}</span> ms`;
+    return;
+  }
+
+  const diffs = recovered.map((v, i) => Math.abs(Number(v) - Number(input[i])));
+  const maxDiff = Math.max(...diffs);
+  const worstIdx = diffs.indexOf(maxDiff);
+  const joints = ["B", "S", "G", "Y", "P", "R"];
+
+  // Soglie round-trip: in condizioni normali max < 0.5°; sopra 3° c'è un
+  // problema (target fuori manifold, jacobiano singolare, ecc.).
+  let level;
+  let label;
+  if (maxDiff < 1.0)       { level = "green";  label = "ROUND-TRIP OK"; }
+  else if (maxDiff < 3.0)  { level = "yellow"; label = "ENTRO TOLLERANZA"; }
+  else                     { level = "red";    label = "SCOSTAMENTO SIGNIFICATIVO"; }
+
+  if (maxEl) {
+    maxEl.textContent = `Max scostamento: ${maxDiff.toFixed(2)}° (giunto ${joints[worstIdx]})`;
+  }
+  if (metaEl && meta) {
+    metaEl.innerHTML = `Solver: ${meta.solver || "POE"} · Iter: ${meta.iterations ?? "—"} · <span id="ik-elapsed-ms">${meta.elapsedMs ?? "-"}</span> ms`;
+  }
+  if (dotEl) {
+    dotEl.className = `ik-error-dot error-dot-${level}`;
+  }
+  if (verdictVal) verdictVal.textContent = label;
+  if (verdictWrap) verdictWrap.className = `error-verdict verdict-${level}`;
+  if (statusEl) {
+    statusEl.textContent = level === "green"
+      ? "IK ricostruisce gli stessi giunti della Sez 1 → premi «Invia posa» per muovere il robot."
+      : level === "yellow"
+        ? "IK entro tolleranza ma non identica — invio possibile."
+        : "IK non recupera gli stessi giunti: target probabilmente singolare o fuori manifold.";
+  }
+}
+
+function _clearRoundTripVerdict(errMsg) {
+  const maxEl = document.getElementById("ik-round-max");
+  const dotEl = document.getElementById("ik-round-dot");
+  const verdictWrap = document.getElementById("ik-round-verdict");
+  const verdictVal = document.getElementById("ik-round-verdict-value");
+  const statusEl = document.getElementById("ik-round-status");
+  if (maxEl) maxEl.textContent = "Max scostamento: — (IK non risolta)";
+  if (dotEl) dotEl.className = "ik-error-dot error-dot-red";
+  if (verdictVal) verdictVal.textContent = "IK NON RISOLTA";
+  if (verdictWrap) verdictWrap.className = "error-verdict verdict-red";
+  if (statusEl) statusEl.textContent = `IK fallita: ${errMsg || "target fuori workspace"}`;
+}
+
+/**
+ * Aggiorna il pannello "Stato robot" (Sezione 2 della UI tesi-ready).
+ * Pillole: Stato moto, IMU, Sample rate, Tracking.
+ */
+function _updateStatePanel() {
+  // Motion state — derivato dalla macchina a stati del compare:
+  //   IDLE: nessun target armato o robot in attesa SETPOSE_DONE
+  //   MOVING: WAIT_MOVE_DONE / WAIT_SETTLE
+  //   TRACKING: TRACKING + estimator primed
+  let motionState = "IDLE";
+  if (_ikCompare.activeTarget) {
+    if (_ikCompare.comparePhase === IK_COMPARE_PHASE.WAIT_MOVE_DONE ||
+        _ikCompare.comparePhase === IK_COMPARE_PHASE.WAIT_SETTLE) {
+      motionState = "MOVING";
+    } else if (_ikCompare.comparePhase === IK_COMPARE_PHASE.TRACKING &&
+               _ikCompare.estimatorPrimed) {
+      motionState = "TRACKING";
+    } else {
+      motionState = "WAITING";
+    }
+  }
+  _setStatePill("motion", motionState);
+
+  // IMU health — OK se valid+primed, WAIT se valid ma non ancora primed,
+  // DEGRADED se invalid (debounce false).
+  let imuState;
+  if (!_ikCompare.lastImuValid) imuState = "DEGRADED";
+  else if (!_ikCompare.estimatorPrimed && _ikCompare.activeTarget) imuState = "WAIT";
+  else imuState = "OK";
+  _setStatePill("imu", imuState);
+
+  // Sample rate (Hz)
+  const rateEl = document.getElementById("state-value-rate");
+  if (rateEl) {
+    rateEl.textContent = Number.isFinite(_ikCompare.lastImuRateHz)
+      ? `${_ikCompare.lastImuRateHz.toFixed(1)} Hz`
+      : "— Hz";
+  }
+
+  // Tracking indicator
+  const isTracking = motionState === "TRACKING";
+  const trackEl = document.getElementById("state-value-track");
+  if (trackEl) {
+    trackEl.innerHTML = isTracking
+      ? '<span class="state-dot state-dot-on">●</span> ATTIVO'
+      : '<span class="state-dot state-dot-off">●</span> inattivo';
+  }
+}
+
+function _setStatePill(kind, value) {
+  const el = document.getElementById(`state-value-${kind}`);
+  if (!el) return;
+  el.textContent = value;
+  const pill = document.getElementById(`state-pill-${kind}`);
+  if (!pill) return;
+  // Reset classi livello e applica quella corrente.
+  pill.classList.remove("state-level-ok", "state-level-wait", "state-level-bad", "state-level-idle", "state-level-moving");
+  if (value === "OK" || value === "TRACKING") pill.classList.add("state-level-ok");
+  else if (value === "WAIT" || value === "WAITING") pill.classList.add("state-level-wait");
+  else if (value === "DEGRADED") pill.classList.add("state-level-bad");
+  else if (value === "MOVING") pill.classList.add("state-level-moving");
+  else pill.classList.add("state-level-idle");
+}
+
+/**
+ * Aggiorna la "summary line" sotto il blocco Errore:
+ *   "Stato: ALLINEATO / SCOSTAMENTO MODERATO / ERRORE ELEVATO / —"
+ * Basata sulle norme ||Δpos|| e ||Δrot||, con le stesse soglie del card errore.
+ */
+function _updateVerdict(err) {
+  const el = document.getElementById("ik-error-verdict-value");
+  const wrap = document.getElementById("ik-error-verdict");
+  if (!el || !wrap) return;
+
+  if (!_ikCompare.activeTarget) {
+    el.textContent = "—";
+    wrap.className = "error-verdict verdict-idle";
+    return;
+  }
+  const { posMm, rotDeg } = _errorNorms(err);
+  if (posMm === null || rotDeg === null) {
+    el.textContent = "in attesa stima IMU…";
+    wrap.className = "error-verdict verdict-idle";
+    return;
+  }
+  const posLevel = _errorLevel(posMm, ERROR_POS_GREEN_MM, ERROR_POS_YELLOW_MM);
+  const rotLevel = _errorLevel(rotDeg, ERROR_ROT_GREEN_DEG, ERROR_ROT_YELLOW_DEG);
+  const order = { green: 0, yellow: 1, red: 2 };
+  const worst = (order[rotLevel] > order[posLevel]) ? rotLevel : posLevel;
+  let label;
+  if (worst === "green") label = "ALLINEATO";
+  else if (worst === "yellow") label = "SCOSTAMENTO MODERATO";
+  else label = "ERRORE ELEVATO";
+  el.textContent = label;
+  wrap.className = `error-verdict verdict-${worst}`;
+}
+
+/**
+ * Rende la card "Errore di posa":
+ *  - valori Δ per-campo (con segno, mm/°)
+ *  - pallino tri-stato + norme ||Δpos||, ||Δrot||
+ *  - ciascuna cella colorata secondo la soglia (verde/giallo/rosso)
+ */
+function _renderErrorCard(err) {
+  IK_COMPARE_FIELDS.forEach((field) => {
+    const el = document.getElementById(`cmp-error-${field.key}`);
+    if (!el) return;
+    const val = err ? _num(err[field.key]) : null;
+    el.textContent = val === null ? "—" : _fmtPoseValue(field.key, val);
+    // Colora la cella con la classe di livello (pos vs rot hanno soglie diverse).
+    const level = (val === null)
+      ? "idle"
+      : (field.kind === "rot"
+          ? _errorLevel(Math.abs(val), ERROR_ROT_GREEN_DEG, ERROR_ROT_YELLOW_DEG)
+          : _errorLevel(Math.abs(val), ERROR_POS_GREEN_MM, ERROR_POS_YELLOW_MM));
+    el.className = `cell-value error-${level}`;
+  });
+
+  const { posMm, rotDeg } = _errorNorms(err);
+  const posEl = document.getElementById("cmp-error-norm-pos");
+  const rotEl = document.getElementById("cmp-error-norm-rot");
+  const dotEl = document.getElementById("cmp-error-dot");
+  if (posEl) {
+    posEl.textContent = posMm === null
+      ? "Errore posizione: —"
+      : `Errore posizione: ${posMm.toFixed(1)} mm`;
+  }
+  if (rotEl) {
+    rotEl.textContent = rotDeg === null
+      ? "Errore orientazione: —"
+      : `Errore orientazione: ${rotDeg.toFixed(1)}°`;
+  }
+  if (dotEl) {
+    // Il livello complessivo è il peggiore tra posizione e orientazione.
+    const levelPos = posMm === null ? "idle" : _errorLevel(posMm, ERROR_POS_GREEN_MM, ERROR_POS_YELLOW_MM);
+    const levelRot = rotDeg === null ? "idle" : _errorLevel(rotDeg, ERROR_ROT_GREEN_DEG, ERROR_ROT_YELLOW_DEG);
+    const order = { idle: 0, green: 1, yellow: 2, red: 3 };
+    const worst = (order[levelRot] || 0) > (order[levelPos] || 0) ? levelRot : levelPos;
+    dotEl.className = `ik-error-dot error-dot-${worst}`;
+  }
+}
+
 function _currentTargetPose() {
   return _ikCompare.activeTarget || collectTarget();
 }
@@ -517,19 +1049,45 @@ function _currentTargetLabel() {
   return "Campi IK correnti (non ancora inviati)";
 }
 
-function _computeTargetMinusPose(target, pose) {
-  if (!target || !pose) return null;
+/**
+ * Errore firmato "reale − teorico": ΔX = real.x − target.x, ecc.
+ * Per gli angoli applica wrap [-180, +180] così il segno resta leggibile
+ * anche attraverso il confine yaw ±180°.
+ * Ritorna null se uno dei due pose manca; i singoli campi possono essere
+ * null se l'origine non li espone ancora.
+ */
+function _computeRealMinusTarget(target, real) {
+  if (!target || !real) return null;
   const out = {};
   IK_COMPARE_FIELDS.forEach((field) => {
     const t = _num(target[field.key]);
-    const p = _num(pose[field.key]);
-    if (t === null || p === null) {
+    const r = _num(real[field.key]);
+    if (t === null || r === null) {
       out[field.key] = null;
       return;
     }
-    out[field.key] = field.kind === "rot" ? _normAngleDeg(t - p) : (t - p);
+    out[field.key] = field.kind === "rot" ? _normAngleDeg(r - t) : (r - t);
   });
   return out;
+}
+
+function _errorNorms(err) {
+  if (!err) return { posMm: null, rotDeg: null };
+  const dx = _num(err.x);
+  const dy = _num(err.y);
+  const dz = _num(err.z);
+  const dY = _num(err.yaw);
+  const dP = _num(err.pitch);
+  const dR = _num(err.roll);
+  const posMm = [dx, dy, dz].every(Number.isFinite)
+    ? Math.hypot(dx, dy, dz)
+    : null;
+  // Norma angolare: somma euclidea degli Euler ZYX signed (proxy leggibile;
+  // non è una metrica geodetica ma basta per il confronto della card).
+  const rotDeg = [dY, dP, dR].every(Number.isFinite)
+    ? Math.hypot(dY, dP, dR)
+    : null;
+  return { posMm, rotDeg };
 }
 
 function _setCompareStatus(text) {
@@ -543,21 +1101,27 @@ function _setCompareStatus(text) {
 
 function renderIkCompare() {
   const target = _currentTargetPose();
-  const delta = _computeTargetMinusPose(_ikCompare.activeTarget, _ikCompare.imuEstimatePose);
+  const real = _ikCompare.imuEstimatePose;
+  const err = _computeRealMinusTarget(_ikCompare.activeTarget, real);
+
   _renderComparePose("target", target);
-  _renderComparePose("fk", _ikCompare.fkLivePose);
-  _renderComparePose("imu", _ikCompare.imuEstimatePose);
-  _renderComparePose("delta", delta);
+  _renderComparePose("real", real);
+  _renderErrorCard(err);
+  _updateStatePanel();
+  _updateVerdict(err);
 
   _setCompareMeta("target", _currentTargetLabel());
-  _setCompareMeta("fk", _ikCompare.fkLivePose ? "Stato live dai servo_deg_* correnti" : "In attesa di telemetria servo");
   _setCompareMeta(
-    "imu",
-    _ikCompare.estimatorPrimed
-      ? "Stima attiva da wrist-center + IMU"
-      : "Prime dopo SETPOSE_DONE + stabilizzazione (vedi stato sopra)",
+    "real",
+    !_ikCompare.estimatorPrimed
+      ? "In attesa di prime IMU (dopo SETPOSE + stabilizzazione)"
+      : _ikCompare.imuAccelRawAvailable
+        ? "Stima con IMU (integrazione inerziale)"
+        : "Orientazione IMU + ancoraggio FK (accel raw non esposto)",
   );
-  _setCompareMeta("delta", _ikCompare.activeTarget ? "Differenza signed: target - stima IMU" : "Diventa utile dopo il primo invio IK");
+  _setCompareMeta("error", _ikCompare.activeTarget
+    ? "Δ = reale − teorica (verde <5 mm / <2° · giallo <20 mm / <8° · rosso oltre)"
+    : "Diventa utile dopo il primo invio IK");
 
   if (!_ikCompare.activeTarget) {
     _setCompareStatus("Invia una posa IK per armare il confronto realtime");
@@ -729,6 +1293,35 @@ function _updateImuEstimator(msg) {
     return;
   }
 
+  // BNO085 v1 pubblica solo Rotation Vector: accel/gyro sono esattamente 0
+  // in telemetria (imu.c:672-677). In quel caso non si può integrare
+  // un'accelerazione lineare: la sottrazione di IMU_GRAVITY_MPS2 lascerebbe
+  // un residuo di -g su Z che farebbe divergere la stima (esattamente il
+  // "Z esplode" osservato). Finché i campi raw restano zero, ancoriamo il
+  // wrist-center stimato al wrist-center FK live corrente e usiamo l'IMU
+  // solo per l'orientazione. Il test è sull'accel: gyro a zero da solo è
+  // valido anche a robot fermo; accel raw identicamente zero NON lo è
+  // (gravity exists), quindi è un marker affidabile di "accel non esposto".
+  const accelRawAvailable = accBody.some((v) => Math.abs(Number(v)) > 1e-6);
+  _ikCompare.imuAccelRawAvailable = accelRawAvailable;
+  if (!accelRawAvailable) {
+    const fkPose = _ikCompare.fkLivePose || _extractFkLivePose(msg);
+    if (fkPose) {
+      const wcM = fkPose.wcMm.map((v) => Number(v) / 1000.0);
+      const pose = _buildImuEstimatePose(wcM, quat);
+      if (pose) {
+        _ikCompare.fkLivePose = fkPose;
+        _ikCompare.estWcPosM = wcM;
+        _ikCompare.estVelMps = [0, 0, 0];
+        _ikCompare.lastTelemetryTsMs = performance.now();
+        _ikCompare.lastImuSampleCounter = _num(msg?.imu_sample_counter);
+        _ikCompare.imuEstimatePose = pose;
+      }
+    }
+    renderIkCompare();
+    return;
+  }
+
   const sampleCounter = _num(msg?.imu_sample_counter);
   const nowMs = performance.now();
   if (
@@ -747,9 +1340,16 @@ function _updateImuEstimator(msg) {
   _ikCompare.lastTelemetryTsMs = nowMs;
   _ikCompare.lastImuSampleCounter = sampleCounter;
 
-  const rot = _quatWxyzToMatrix3(quat.w, quat.x, quat.y, quat.z);
-  const accWorld = _matVecMul3(rot, accBody);
-  let linAccWorld = [accWorld[0], accWorld[1], accWorld[2] - IMU_GRAVITY_MPS2];
+  // Dormant path (BNO085 v1 keeps accBody identically zero, so the guard
+  // above returns before we get here). When Phase 6 enables Calibrated
+  // Accel, we want integrated velocity/position directly in base frame, so
+  // rotate body accel via qBase = R_ee (same transform used for orientation
+  // and tool-offset display above). Gravity cancellation then holds under
+  // the operational assumption that base frame Z is gravity-up.
+  const qBase = _imuQuatToBaseFrame(quat);
+  const rot = _quatWxyzToMatrix3(qBase.w, qBase.x, qBase.y, qBase.z);
+  const accBase = _matVecMul3(rot, accBody);
+  let linAccWorld = [accBase[0], accBase[1], accBase[2] - IMU_GRAVITY_MPS2];
   const accMag = _vecNorm(linAccWorld);
   const gyroMag = _vecNorm(gyro);
   if (accMag < IMU_ACCEL_DEADBAND_MPS2) {
@@ -783,6 +1383,12 @@ function initCompareTelemetry() {
   registerTelemetryHandler((msg) => {
     const fkPose = _extractFkLivePose(msg);
     if (fkPose) _ikCompare.fkLivePose = fkPose;
+    // Cache l'ultimo frame valido con IMU+FK per il capture "Azzera IMU @ HOME":
+    // così al click non dobbiamo fare request aggiuntive.
+    if (msg && msg.imu_valid === true && msg.fk_live_valid === true &&
+        Number.isFinite(Number(msg.imu_q_w)) && Number.isFinite(Number(msg.fk_live_quat_w))) {
+      _lastTelemetryForZero = msg;
+    }
     _updateImuEstimator(msg);
   });
 }
@@ -794,10 +1400,22 @@ function setIKStatus(state, text) {
   const badge = document.getElementById("ik-status-badge");
   const dot   = document.getElementById("ik-status-dot");
   const label = document.getElementById("ik-status-text");
-  if (!badge) return;
-  badge.className = `ik-status ${state}`;
-  dot.textContent   = state === "ok" ? "●" : state === "error" ? "✕" : state === "computing" ? "…" : "○";
-  label.textContent = text;
+  if (badge) {
+    badge.className = `ik-status ${state}`;
+    if (dot)   dot.textContent   = state === "ok" ? "●" : state === "error" ? "✕" : state === "computing" ? "…" : "○";
+    if (label) label.textContent = text;
+  }
+  // Specchio tesi-ready sotto il bottone primario di Sezione 1.
+  const tesisLine = document.getElementById("tesis-target-status");
+  if (tesisLine) {
+    let short = text;
+    if (state === "computing") short = "Calcolo IK in corso…";
+    else if (state === "ok") short = _ikAutoSendPending
+        ? "Soluzione trovata — invio in corso…"
+        : "Soluzione trovata — pronto all'invio";
+    else if (state === "error") short = `IK non risolta · ${text}`;
+    tesisLine.textContent = short;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -945,12 +1563,35 @@ function initIkResultHandler() {
       setIKStatus("ok", `Soluzione trovata — ${su} · err_pos ${msg.error_pos} mm, err_ori ${msg.error_ori}°, iter ${msg.iterations}`);
       setIKResult(msg.angles_deg, true);
       const shown = clampAnglesBsgYpr(msg.angles_deg);
+      _renderRecoveredJoints(msg.angles_deg);
+      _updateRoundTripVerdict(msg.angles_deg, {
+        solver: su,
+        iterations: msg.iterations,
+        elapsedMs: elapsedEl?.textContent || "-",
+      });
       addLog(`IK ${su} OK — angoli: [${shown.map(v => v.toFixed(1)).join(", ")}] (${elapsedEl?.textContent || "-"} ms)`);
+      // Auto-send se l'utente ha premuto "Invia posa IK" (unified button).
+      if (_ikAutoSendPending) {
+        _ikAutoSendPending = false;
+        const ok = _sendIkSetposeFromAngles(msg.angles_deg, collectTarget());
+        const tesisLine = document.getElementById("tesis-target-status");
+        if (tesisLine) {
+          tesisLine.textContent = ok
+            ? "Target inviato al robot — attendo esecuzione + stima IMU…"
+            : "Invio non riuscito (WS non connesso)";
+        }
+      }
     } else {
       const su = msg.solver_used || "POE";
       setIKStatus("error", msg.message || "Target fuori workspace");
       setIKResult([], false);
+      _renderRecoveredJoints(null);
+      _clearRoundTripVerdict(msg.message || "Target fuori workspace");
       addLog(`IK ${su} FAIL — ${msg.message || "fuori workspace"}`);
+      if (_ikAutoSendPending) {
+        _ikAutoSendPending = false;
+        addLog("⚠ Auto-send annullato: target non raggiungibile");
+      }
     }
 
     // Aggiorna il pill solver
@@ -958,6 +1599,48 @@ function initIkResultHandler() {
     if (solver) {
       solver.textContent = msg.reachable ? "OK" : "FAIL";
       solver.className   = `diag-value state-pill ${msg.reachable ? "state-on" : "state-warn"}`;
+    }
+  });
+}
+
+/**
+ * Inviare SETPOSE a partire da una lista di angoli virtuali (°).
+ * Estratto da initSendIK per riuso dal flusso "Invia posa IK" unificato,
+ * dove non è disponibile la griglia angoli DOM al momento dell'invio.
+ */
+function _sendIkSetposeFromAngles(angles, targetPose) {
+  if (!Array.isArray(angles) || angles.length !== 6) return false;
+  const [b, s, g, y, p, r] = angles.map((v, i) => {
+    const key = JOINT_LIMIT_KEYS[i];
+    const base = Number.isFinite(Number(v)) ? Number(v) : 90;
+    return Math.round(clampVirtualJoint(key, base));
+  });
+  const cmd = `SETPOSE ${b} ${s} ${g} ${y} ${p} ${r} ${_ikVel} ${_ikProfile}`;
+  if (!sendCommand("uart", { cmd })) {
+    addLog("✗ SETPOSE IK non inviato (WS non connesso)");
+    return false;
+  }
+  addLog(`… SETPOSE IK inviato (pending conferma): ${cmd}`);
+  armIkCompareTarget(targetPose);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Unified "Invia posa IK" — calcola + attendi ik_result + invia in un click.
+// Il calcolo riusa initCalcIK (UI/stato coerenti); l'auto-send avviene in
+// initIkResultHandler quando _ikAutoSendPending=true.
+// ---------------------------------------------------------------------------
+function initUnifiedSendButton() {
+  const btn = document.getElementById("btn-send-ik-unified");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    _ikAutoSendPending = true;
+    const calcBtn = document.getElementById("btn-calc-ik");
+    if (calcBtn && !calcBtn.disabled) {
+      calcBtn.click();
+    } else {
+      _ikAutoSendPending = false;
+      addLog("✗ Calcolo IK in corso o non disponibile");
     }
   });
 }
@@ -1022,6 +1705,10 @@ function initCalcFk() {
       const raw = gv(id);
       return clampVirtualJoint(k, Number.isFinite(raw) ? raw : 90);
     });
+    // Memorizza gli angoli giunto della Sezione 1 come riferimento del
+    // round-trip FK→IK: verranno confrontati con gli angoli ricostruiti
+    // dall'IK solver applicata alla posa FK qui sotto.
+    _roundTripInputJoints = angles.slice();
     const st = document.getElementById("fk-status");
     if (st) st.textContent = "Calcolo in corso…";
     if (!sendCommand("compute_fk_poe", { angles_deg: angles })) {
@@ -1066,12 +1753,23 @@ function initFkResultHandler() {
     if ([x, y, z, roll, pitch, yaw].every((v) => Number.isFinite(v))) {
       applyTarget({ x, y, z, roll, pitch, yaw });
       addLog("FK: posa copiata nei campi target IK");
+      // Mirror sotto il card FK per dire "questa è la posa che entra in IK"
+      const setMirror = (id, v) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = Number.isFinite(v) ? v.toFixed(1) : "—";
+      };
+      setMirror("ik-target-mirror-x", x);
+      setMirror("ik-target-mirror-y", y);
+      setMirror("ik-target-mirror-z", z);
     }
     const q = msg.quat_xyzw;
     const qel = document.getElementById("fk-out-quat");
     if (qel && Array.isArray(q) && q.length === 4) {
       qel.textContent = `Quaternione (xyzw): ${q.map((n) => Number(n).toFixed(4)).join(", ")}`;
     }
+    // Segnala che ora si può passare a Sezione 3 (Calcola IK).
+    const roundStatus = document.getElementById("ik-round-status");
+    if (roundStatus) roundStatus.textContent = "FK completata → premi «Calcola IK» per ricostruire i giunti.";
   });
 }
 
@@ -1100,6 +1798,7 @@ function initPoeParamsHandler() {
 // Init
 // ---------------------------------------------------------------------------
 function init() {
+  console.log("[IK-FRAME-FIX v1] ik.js loaded — IMU compare expressed in base frame via R_ee = R_world_bias^-1 · R_imu · R_mount^-1");
   const savedTarget = loadTarget();
   if (savedTarget) {
     applyTarget(savedTarget);
@@ -1107,6 +1806,9 @@ function init() {
   buildResultGrid();
   buildCompareGrid();
   loadJointLimitsFromBackend();
+  // Fire-and-forget: identity until loaded; subsequent telemetry frames
+  // automatically pick up the new calib once the fetch resolves.
+  void _loadImuFrameCalib();
   initCollapsibles();
   initSaveTarget();
   initCalcIK();
@@ -1114,7 +1816,9 @@ function init() {
   initCalcFk();
   initFkResultHandler();
   initSendIK();
+  initUnifiedSendButton();
   initHomeIK();
+  initZeroAtHomeButtons();
   initPoeParamsHandler();
   initCompareTelemetry();
   initIkCompareSetposeDone();

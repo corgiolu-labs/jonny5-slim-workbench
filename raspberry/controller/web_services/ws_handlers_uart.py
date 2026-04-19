@@ -117,6 +117,13 @@ _HARD_RECOVERY_STAMP_PATH = "/tmp/j5_unknown_hard_recovery.ts"
 # senza cambiare la modalità corrente.
 _pose_zero_pending: bool = False
 _pose_zero_mode: int = 0
+
+# HOME → relax PITCH/ROLL: ogni volta che HOME viene accettato dal firmware
+# (ack OK SETPOSE dopo traduzione lato Pi), al successivo SETPOSE_DONE inviamo
+# RELAX_DIGITAL per rilasciare i due servo più stressati e ridurne il
+# surriscaldamento. Altri servo restano ingaggiati. Flag consumata e azzerata
+# una sola volta per HOME.
+_home_relax_pending: bool = False
 _self_test_task: "asyncio.Task | None" = None
 
 
@@ -718,6 +725,14 @@ async def handle_uart_cmd(websocket, data: dict) -> None:
                     logger.info("[POSE] TELEOPPOSE ok in mode=%d: HEADZERO pianificato su SETPOSE_DONE", mode_now)
                 elif not ok:
                     _pose_zero_pending = False
+            if cmd_upper == "HOME":
+                # HOME → dopo SETPOSE_DONE, rilascia automaticamente PITCH e ROLL
+                # (i due servo che scaldano di più) inviando RELAX_DIGITAL al
+                # firmware. Nessuna modifica alle altre pose o agli altri giunti.
+                global _home_relax_pending
+                _home_relax_pending = bool(ok)
+                if ok:
+                    logger.info("[POSE] HOME ok: RELAX_DIGITAL pianificato su SETPOSE_DONE (PITCH+ROLL)")
             if ok and _is_setpose:
                 logger.info("[UART] SETPOSE eseguito: %s", uart_cmd)
         except Exception as e:
@@ -987,6 +1002,38 @@ def _build_set_pwm_config_cmd(cfg: dict) -> str:
     )
 
 
+async def apply_persisted_offsets_to_firmware() -> bool:
+    """Invia SET_OFFSETS al firmware con gli offset meccanici da j5_settings.
+
+    Necessario perché il firmware nasce con offset di fabbrica hard-coded
+    (servo_control.c: {104,107,77,88,95,104}) che possono differire dai
+    valori calibrati persistiti in j5_settings.offsets. Sincronizzare questa
+    array fa sì che il pulsante fisico HOME (rt_loop.c → j5vr_center_all_servos
+    → usa _servo_offset_deg come target) produca ESATTAMENTE la stessa posa
+    raggiunta da WS HOME (che invece traduce virtuale→fisico usando j5_settings).
+
+    Unica fonte di verità: j5_settings.offsets. Entrambe le pipeline HOME la usano.
+    """
+    try:
+        current = settings_manager.load()
+        offsets = current.get("offsets", settings_manager.DEFAULTS["offsets"])
+        vals = [int(v) for v in offsets]
+        if len(vals) != 6:
+            logger.warning("[OFFSETS][APPLY] offsets malformati (len=%d): %s", len(vals), vals)
+            return False
+        cmd = "SET_OFFSETS " + " ".join(str(v) for v in vals)
+        logger.info("[OFFSETS][APPLY] %s", cmd)
+        ok, response = await uart_manager.send_uart_command(cmd, timeout_s=1.5)
+        if ok:
+            logger.info("[OFFSETS][APPLY] OK (synced firmware _servo_offset_deg to %s)", vals)
+        else:
+            logger.warning("[OFFSETS][APPLY] firmware ERR: %s", response)
+        return bool(ok)
+    except Exception as e:
+        logger.warning("[OFFSETS][APPLY] exception: %s", e)
+        return False
+
+
 async def apply_pwm_config_now(cfg: dict | None = None) -> bool:
     """Invia SET_PWM_CONFIG al firmware. Usa config persistita se cfg=None."""
     if cfg is None:
@@ -1249,6 +1296,7 @@ async def apply_vr_config_at_startup() -> None:
     if _boot_config_applied:
         logger.debug("[STARTUP] config VR già applicata via BOOT_READY — fallback saltato")
         return
+    await apply_persisted_offsets_to_firmware()
     await apply_persisted_vr_config_to_firmware()
     await apply_pwm_config_now()
     _boot_config_applied = True
@@ -1297,11 +1345,15 @@ def on_uart_unsolicited(line: str) -> None:
     [RPi-0.7] Vedi nota cross-thread sopra.
     """
     if line.startswith("BOOT_READY"):
-        logger.info("[UART UNSOLICITED] BOOT_READY ricevuto — applico config VR + PWM persistita")
+        logger.info("[UART UNSOLICITED] BOOT_READY ricevuto — applico offsets + config VR + PWM persistita")
         global _boot_config_applied
         _boot_config_applied = True
         if _main_loop is not None:
             async def _apply_all():
+                # Offsets first: the firmware physical-button HOME path reads
+                # _servo_offset_deg as its target, so this sync makes that path
+                # identical to WS HOME. Must run before any user HOME attempt.
+                await apply_persisted_offsets_to_firmware()
                 await apply_persisted_vr_config_to_firmware()
                 await apply_pwm_config_now()
             asyncio.run_coroutine_threadsafe(_apply_all(), _main_loop)
@@ -1349,6 +1401,13 @@ def on_uart_unsolicited(line: str) -> None:
         _pose_zero_pending = False
         asyncio.run_coroutine_threadsafe(_send_headzero_after_pose(mode), _main_loop)
 
+    # Se HOME aveva richiesto il rilascio di PITCH/ROLL, invialo ora.
+    # Flag consumata una sola volta, esattamente a fine traiettoria HOME.
+    global _home_relax_pending
+    if _home_relax_pending and _main_loop is not None:
+        _home_relax_pending = False
+        asyncio.run_coroutine_threadsafe(_send_relax_digital_after_home(), _main_loop)
+
 
 async def _broadcast_setpose_done(payload: str) -> None:
     """Invia il messaggio setpose_done a tutti i client WS connessi."""
@@ -1367,3 +1426,19 @@ async def _send_headzero_after_pose(mode: int) -> None:
             logger.warning("[POSE] HEADZERO fallito (mode=%d): %s", mode, response)
     except Exception as e:
         logger.warning("[POSE] errore invio HEADZERO (mode=%d): %s", mode, e)
+
+
+async def _send_relax_digital_after_home() -> None:
+    """Invia RELAX_DIGITAL dopo SETPOSE_DONE di HOME per rilasciare PITCH/ROLL.
+
+    Evita il surriscaldamento dei due servo più stressati quando il braccio
+    viene lasciato a HOME. Gli altri servo restano ingaggiati. La richiesta
+    viene emessa una sola volta per ciclo HOME."""
+    try:
+        ok, response = await uart_manager.send_uart_command("RELAX_DIGITAL", timeout_s=1.0)
+        if ok:
+            logger.info("[POSE] HOME → RELAX_DIGITAL eseguito: PITCH+ROLL rilasciati")
+        else:
+            logger.warning("[POSE] HOME → RELAX_DIGITAL fallito: %s", response)
+    except Exception as e:
+        logger.warning("[POSE] errore invio RELAX_DIGITAL dopo HOME: %s", e)

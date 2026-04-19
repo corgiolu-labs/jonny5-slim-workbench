@@ -69,4 +69,13 @@ void j5vr_go_setpose_time(
     j5_profile_t    prof
 );
 
+/**
+ * Opt-in: al termine del setpose in corso, rilascia (PWM=0) i servo digitali
+ * PITCH/ROLL per ridurre il surriscaldamento (usa servo_relax_digital).
+ * La flag viene azzerata ad ogni nuovo j5vr_go_setpose/_time: il chiamante deve
+ * invocare questa funzione DOPO aver avviato il setpose. Non avvia/completa
+ * alcun movimento da sola.
+ */
+void j5vr_setpose_request_relax_digital_on_finish(void);
+
 #endif /* J5VR_SETPOSE_H */
