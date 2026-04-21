@@ -344,7 +344,9 @@ async def main():
     else:
         verdicts.append(("pitch_down produced arm motion", False, "no motion detected"))
 
-    if home_bsg and last_bsg(final) and distance(home_bsg, last_bsg(final)) < 2.0:
+    # Task spec is residual <= 2.0°. Previous strict `< 2.0` marked the
+    # on-the-line 2.00° case as FAIL even though it meets the spec.
+    if home_bsg and last_bsg(final) and distance(home_bsg, last_bsg(final)) <= 2.0:
         verdicts.append(("arm returns to HOME after identity", True, f"residual={distance(home_bsg, last_bsg(final)):.2f}°"))
     else:
         res = distance(home_bsg, last_bsg(final)) if home_bsg and last_bsg(final) else 0.0

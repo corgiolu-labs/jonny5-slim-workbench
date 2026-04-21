@@ -241,20 +241,21 @@
           <div class="tune-note" style="margin-top:0.5rem;">
             <b>Reattivita' braccio (gainM)</b>: moltiplica la deviazione del vettore direzione testa rispetto al forward a HOME.
             Per piccoli angoli si comporta circa come <code>m/rad</code>; satura a <code>2 &middot; gainM</code> per rotazione 180&deg;.
-            Valori consigliati per primo test: <code>0.08 &ndash; 0.10</code>.
+            Baseline validata (2026-04-21): <code>0.15</code>. Per primo test su robot diverso partire da <code>0.08 &ndash; 0.10</code> e salire gradualmente.
           </div>
-          <div class="tune-row"><label for="hdls-gain-m">Reattivita' braccio (m)</label><input type="range" id="hdls-gain-m" min="0.05" max="0.40" step="0.01" value="0.22"><span class="tune-val" id="tv-hdls-gain-m">0.22</span></div>
-          <div class="tune-row"><label for="hdls-null-gain">Null-space gain</label><input type="range" id="hdls-null-gain" min="0" max="0.5" step="0.01" value="0.15"><span class="tune-val" id="tv-hdls-null-gain">0.15</span></div>
+          <div class="tune-row"><label for="hdls-gain-m">Reattivita' braccio (m)</label><input type="range" id="hdls-gain-m" min="0.05" max="0.40" step="0.01" value="0.15"><span class="tune-val" id="tv-hdls-gain-m">0.15</span></div>
+          <div class="tune-row"><label for="hdls-null-gain">Null-space gain</label><input type="range" id="hdls-null-gain" min="0" max="0.5" step="0.01" value="0.20"><span class="tune-val" id="tv-hdls-null-gain">0.20</span></div>
         </div>
         <div class="tune-group">
           <h3>DLS tuning avanzato</h3>
           <div class="tune-note">
             Damping alla Nakamura/Hanafusa. Alza <code>lambdaMax</code> per piu' stabilita' vicino alle singolarita' (sacrificando precisione).
+            <b>Non abbassare <code>manipThresh</code> sotto <code>10</code> (cioe' 1e-3)</b>: riduce il damping vicino a HOME e reintroduce l'escursione non-lineare su pitch_down osservata nel tuning 2026-04-21.
           </div>
-          <div class="tune-row"><label for="hdls-lambda-max">lambdaMax</label><input type="range" id="hdls-lambda-max" min="0.01" max="0.30" step="0.005" value="0.08"><span class="tune-val" id="tv-hdls-lambda-max">0.08</span></div>
-          <div class="tune-row"><label for="hdls-manip-thresh">manipThresh (1e-4)</label><input type="range" id="hdls-manip-thresh" min="1" max="30" step="1" value="5"><span class="tune-val" id="tv-hdls-manip-thresh">5</span></div>
-          <div class="tune-row"><label for="hdls-max-dq">Max dq (°/tick)</label><input type="range" id="hdls-max-dq" min="0.5" max="8" step="0.1" value="4.0"><span class="tune-val" id="tv-hdls-max-dq">4.0</span></div>
-          <div class="tune-row"><label for="hdls-max-dx">Max dx (mm/tick)</label><input type="range" id="hdls-max-dx" min="5" max="80" step="1" value="30"><span class="tune-val" id="tv-hdls-max-dx">30</span></div>
+          <div class="tune-row"><label for="hdls-lambda-max">lambdaMax</label><input type="range" id="hdls-lambda-max" min="0.01" max="0.30" step="0.005" value="0.12"><span class="tune-val" id="tv-hdls-lambda-max">0.12</span></div>
+          <div class="tune-row"><label for="hdls-manip-thresh">manipThresh (1e-4)</label><input type="range" id="hdls-manip-thresh" min="1" max="30" step="1" value="10"><span class="tune-val" id="tv-hdls-manip-thresh">10</span></div>
+          <div class="tune-row"><label for="hdls-max-dq">Max dq (°/tick)</label><input type="range" id="hdls-max-dq" min="0.5" max="8" step="0.1" value="2.0"><span class="tune-val" id="tv-hdls-max-dq">2.0</span></div>
+          <div class="tune-row"><label for="hdls-max-dx">Max dx (mm/tick)</label><input type="range" id="hdls-max-dx" min="5" max="80" step="1" value="15"><span class="tune-val" id="tv-hdls-max-dx">15</span></div>
         </div>
       </div>
 

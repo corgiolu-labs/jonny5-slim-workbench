@@ -186,14 +186,18 @@ let _headAssistDefaults = {
 
 // DLS (position-based ASSIST) defaults — see head_assist_dls.py.
 // assistMode="rate" keeps the historical path; "dls" activates the new one.
+// Values below were validated on the live robot (tuning campaign
+// 2026-04-21, see ai/reports/DLS_ASSIST_TUNING_SUMMARY_*.md).
+// manipThresh=1e-3 is load-bearing: lowering it reintroduces the
+// damping-unlock pitch_down excursion at gainM>=0.12.
 let _assistModeDefault = "rate";
 let _assistDlsDefaults = {
-  gainM: 0.22,
-  lambdaMax: 0.08,
-  manipThresh: 5e-4,
-  maxDqDegPerTick: 4.0,
-  maxDxMmPerTick: 30.0,
-  nullSpaceGain: 0.15,
+  gainM: 0.15,
+  lambdaMax: 0.12,
+  manipThresh: 1e-3,
+  maxDqDegPerTick: 2.0,
+  maxDxMmPerTick: 15.0,
+  nullSpaceGain: 0.20,
 };
 const _assistModeFactory = _assistModeDefault;
 const _assistDlsFactory = JSON.parse(JSON.stringify(_assistDlsDefaults));
@@ -461,12 +465,12 @@ function _buildFullPageConfigObject() {
     },
     assistMode: (document.getElementById("ha-mode")?.value === "dls") ? "dls" : "rate",
     assistDls: {
-      gainM:           parseFloat(document.getElementById("hdls-gain-m")?.value       ?? "0.22"),
-      lambdaMax:       parseFloat(document.getElementById("hdls-lambda-max")?.value   ?? "0.08"),
-      manipThresh:     parseFloat(document.getElementById("hdls-manip-thresh")?.value ?? "5") * 1e-4,
-      maxDqDegPerTick: parseFloat(document.getElementById("hdls-max-dq")?.value       ?? "4.0"),
-      maxDxMmPerTick:  parseFloat(document.getElementById("hdls-max-dx")?.value       ?? "30"),
-      nullSpaceGain:   parseFloat(document.getElementById("hdls-null-gain")?.value    ?? "0.15"),
+      gainM:           parseFloat(document.getElementById("hdls-gain-m")?.value       ?? "0.15"),
+      lambdaMax:       parseFloat(document.getElementById("hdls-lambda-max")?.value   ?? "0.12"),
+      manipThresh:     parseFloat(document.getElementById("hdls-manip-thresh")?.value ?? "10") * 1e-4,
+      maxDqDegPerTick: parseFloat(document.getElementById("hdls-max-dq")?.value       ?? "2.0"),
+      maxDxMmPerTick:  parseFloat(document.getElementById("hdls-max-dx")?.value       ?? "15"),
+      nullSpaceGain:   parseFloat(document.getElementById("hdls-null-gain")?.value    ?? "0.20"),
     },
     savedAt: new Date().toISOString(),
   };

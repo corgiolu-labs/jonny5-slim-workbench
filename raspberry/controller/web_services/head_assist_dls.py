@@ -64,17 +64,21 @@ def parse_assist_dls_cfg(raw: dict | None) -> dict:
         except (TypeError, ValueError):
             return float(dflt)
 
+    # Defaults validated on the live robot (tuning campaign 2026-04-21,
+    # see ai/reports/DLS_ASSIST_TUNING_SUMMARY_*.md). Keep manipThresh at
+    # 1e-3 to prevent the damping-unlock / pitch_down-excursion anomaly
+    # observed at manipThresh=5e-4 and gainM>=0.12.
     return {
-        "gainM":           max(0.02, min(0.50, _f("gainM", 0.22))),
-        "lambdaMax":       max(0.001, min(1.0, _f("lambdaMax", 0.08))),
-        "manipThresh":     max(1e-6, _f("manipThresh", 5e-4)),
-        "maxDqDegPerTick": max(0.1, _f("maxDqDegPerTick", 4.0)),
-        "maxDxMmPerTick":  max(1.0, _f("maxDxMmPerTick", 30.0)),
+        "gainM":           max(0.02, min(0.50, _f("gainM", 0.15))),
+        "lambdaMax":       max(0.001, min(1.0, _f("lambdaMax", 0.12))),
+        "manipThresh":     max(1e-6, _f("manipThresh", 1e-3)),
+        "maxDqDegPerTick": max(0.1, _f("maxDqDegPerTick", 2.0)),
+        "maxDxMmPerTick":  max(1.0, _f("maxDxMmPerTick", 15.0)),
         # Null-space bias toward q=0 (HOME joints). Needed because HOME is
         # kinematically singular for 3-DoF position IK: multiple joint configs
         # yield EE at HOME_ee. Without this, joint state drifts into
         # near-limit configurations even when EE tracks HOME correctly.
-        "nullSpaceGain":   max(0.0, min(1.0, _f("nullSpaceGain", 0.15))),
+        "nullSpaceGain":   max(0.0, min(1.0, _f("nullSpaceGain", 0.20))),
     }
 
 
