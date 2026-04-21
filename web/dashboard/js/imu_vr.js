@@ -548,6 +548,7 @@ function _pbApplyConfigObject(cfg) {
     };
   }
 
+  let _touchedHeadAssistUi = false;
   if (cfg.headAssist && typeof cfg.headAssist === "object") {
     const h = cfg.headAssist;
     _headAssistDefaults = {
@@ -560,18 +561,27 @@ function _pbApplyConfigObject(cfg) {
       pitchSplit: { ..._headAssistDefaults.pitchSplit, ...(h.pitchSplit || {}) },
       rollSplit: { ..._headAssistDefaults.rollSplit, ...(h.rollSplit || {}) },
     };
-    if (typeof cfg.assistMode === "string") {
-      _assistModeDefault = (cfg.assistMode === "dls") ? "dls" : "rate";
-    }
-    if (cfg.assistDls && typeof cfg.assistDls === "object") {
-      _assistDlsDefaults = { ..._assistDlsDefaults, ...cfg.assistDls };
-    }
-    _applyHeadAssistDefaultsToUi();
+    _touchedHeadAssistUi = true;
   } else if (cfg.ikMode && typeof cfg.ikMode === "object") {
     _headAssistDefaults = {
       ..._headAssistDefaults,
       enabled: cfg.ikMode.enabled !== undefined ? !!cfg.ikMode.enabled : _headAssistDefaults.enabled,
     };
+    _touchedHeadAssistUi = true;
+  }
+
+  // assistMode / assistDls are top-level keys, independent from headAssist.
+  // Read them unconditionally so the DLS UI syncs even if the loaded config
+  // has no headAssist block.
+  if (typeof cfg.assistMode === "string") {
+    _assistModeDefault = (cfg.assistMode === "dls") ? "dls" : "rate";
+    _touchedHeadAssistUi = true;
+  }
+  if (cfg.assistDls && typeof cfg.assistDls === "object") {
+    _assistDlsDefaults = { ..._assistDlsDefaults, ...cfg.assistDls };
+    _touchedHeadAssistUi = true;
+  }
+  if (_touchedHeadAssistUi) {
     _applyHeadAssistDefaultsToUi();
   }
 

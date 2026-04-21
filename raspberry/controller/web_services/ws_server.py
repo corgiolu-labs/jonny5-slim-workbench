@@ -112,6 +112,7 @@ _dx_runtime_cfg_cache = {
     "mtime": None,
     "cfg": merge_vr_config_with_defaults({}),
 }
+_last_assist_mode_flag: str | None = None
 
 
 def _extract_servo_physical_deg_from_telemetry() -> list[float] | None:
@@ -209,6 +210,11 @@ def _process_head_assist_mode(intent: dict) -> bool:
     )
 
     assist_mode_flag = str(cfg.get("assistMode", "rate")).strip().lower()
+    global _last_assist_mode_flag
+    if assist_mode_flag != _last_assist_mode_flag:
+        logger.info("[HEAD-ASSIST] assistMode transition: %s -> %s",
+                    _last_assist_mode_flag, assist_mode_flag)
+        _last_assist_mode_flag = assist_mode_flag
     if assist_mode_flag == "dls":
         ha_dls = parse_assist_dls_cfg(cfg.get("assistDls") or {})
         arm, g_active, hold, tid = step_dls_head_assist(

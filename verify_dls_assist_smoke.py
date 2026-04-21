@@ -21,9 +21,11 @@ Safety:
   - Original routing_config fully restored on exit (in finally).
 """
 import asyncio
+import datetime
 import json
 import math
 import os
+import shutil
 import ssl
 import sys
 import time
@@ -135,7 +137,16 @@ async def main():
     print("=" * 88)
 
     original_cfg = load_rcfg()
-    print(f"Backed up routing_config (keys: {len(original_cfg)})")
+    print(f"Backed up routing_config in-memory (keys: {len(original_cfg)})")
+
+    # Physical on-disk backup — survives SIGKILL / crash / power-loss, whereas
+    # the in-memory original_cfg only works if the finally: clause runs.
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = f"{RCFG_PATH}.bak_dls_smoke_{ts}"
+    shutil.copy2(RCFG_PATH, backup_path)
+    print(f"Physical backup written: {backup_path}")
+    print("Se il test viene interrotto brutalmente, ripristinare con:")
+    print(f"  cp {backup_path} {RCFG_PATH}")
 
     # Inject DLS mode (small-amplitude safe parameters)
     test_cfg = json.loads(json.dumps(original_cfg))

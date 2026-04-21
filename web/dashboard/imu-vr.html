@@ -238,7 +238,12 @@
               <option value="dls">dls (sperimentale)</option>
             </select>
           </div>
-          <div class="tune-row"><label for="hdls-gain-m">Gain EE (m/rad)</label><input type="range" id="hdls-gain-m" min="0.05" max="0.40" step="0.01" value="0.22"><span class="tune-val" id="tv-hdls-gain-m">0.22</span></div>
+          <div class="tune-note" style="margin-top:0.5rem;">
+            <b>Reattivita' braccio (gainM)</b>: moltiplica la deviazione del vettore direzione testa rispetto al forward a HOME.
+            Per piccoli angoli si comporta circa come <code>m/rad</code>; satura a <code>2 &middot; gainM</code> per rotazione 180&deg;.
+            Valori consigliati per primo test: <code>0.08 &ndash; 0.10</code>.
+          </div>
+          <div class="tune-row"><label for="hdls-gain-m">Reattivita' braccio (m)</label><input type="range" id="hdls-gain-m" min="0.05" max="0.40" step="0.01" value="0.22"><span class="tune-val" id="tv-hdls-gain-m">0.22</span></div>
           <div class="tune-row"><label for="hdls-null-gain">Null-space gain</label><input type="range" id="hdls-null-gain" min="0" max="0.5" step="0.01" value="0.15"><span class="tune-val" id="tv-hdls-null-gain">0.15</span></div>
         </div>
         <div class="tune-group">
