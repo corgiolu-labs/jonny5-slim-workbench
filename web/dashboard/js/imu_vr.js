@@ -183,6 +183,20 @@ let _headAssistDefaults = {
   maxStepDegPerTick: 4.0,
   reliefDeadband: 0.015,
 };
+
+// DLS (position-based ASSIST) defaults — see head_assist_dls.py.
+// assistMode="rate" keeps the historical path; "dls" activates the new one.
+let _assistModeDefault = "rate";
+let _assistDlsDefaults = {
+  gainM: 0.22,
+  lambdaMax: 0.08,
+  manipThresh: 5e-4,
+  maxDqDegPerTick: 4.0,
+  maxDxMmPerTick: 30.0,
+  nullSpaceGain: 0.15,
+};
+const _assistModeFactory = _assistModeDefault;
+const _assistDlsFactory = JSON.parse(JSON.stringify(_assistDlsDefaults));
 let _headAssistFactoryDefaults = JSON.parse(JSON.stringify(_headAssistDefaults));
 
 // Etichette brevi per ogni src (per testo nelle celle patch bay visore)
@@ -221,6 +235,16 @@ function _applyHeadAssistDefaultsToUi() {
   setRg("ha-max-step", d.maxStepDegPerTick, "tv-ha-max-step");
   setSel("ha-sign-yaw", d.signYaw);
   setSel("ha-sign-pitch", d.signPitch);
+
+  // DLS block
+  const dls = _assistDlsDefaults;
+  setSel("ha-mode", _assistModeDefault);
+  setRg("hdls-gain-m",       dls.gainM,             "tv-hdls-gain-m");
+  setRg("hdls-null-gain",    dls.nullSpaceGain,     "tv-hdls-null-gain");
+  setRg("hdls-lambda-max",   dls.lambdaMax,         "tv-hdls-lambda-max");
+  setRg("hdls-manip-thresh", Math.round(dls.manipThresh * 1e4), "tv-hdls-manip-thresh");
+  setRg("hdls-max-dq",       dls.maxDqDegPerTick,   "tv-hdls-max-dq");
+  setRg("hdls-max-dx",       dls.maxDxMmPerTick,    "tv-hdls-max-dx");
 }
 
 function _pbServoenable(servo) {
@@ -435,6 +459,15 @@ function _buildFullPageConfigObject() {
       maxStepDegPerTick: parseFloat(document.getElementById("ha-max-step")?.value ?? "4.0"),
       reliefDeadband: _headAssistDefaults.reliefDeadband,
     },
+    assistMode: (document.getElementById("ha-mode")?.value === "dls") ? "dls" : "rate",
+    assistDls: {
+      gainM:           parseFloat(document.getElementById("hdls-gain-m")?.value       ?? "0.22"),
+      lambdaMax:       parseFloat(document.getElementById("hdls-lambda-max")?.value   ?? "0.08"),
+      manipThresh:     parseFloat(document.getElementById("hdls-manip-thresh")?.value ?? "5") * 1e-4,
+      maxDqDegPerTick: parseFloat(document.getElementById("hdls-max-dq")?.value       ?? "4.0"),
+      maxDxMmPerTick:  parseFloat(document.getElementById("hdls-max-dx")?.value       ?? "30"),
+      nullSpaceGain:   parseFloat(document.getElementById("hdls-null-gain")?.value    ?? "0.15"),
+    },
     savedAt: new Date().toISOString(),
   };
   const joints = ["base", "spalla", "gomito", "yaw", "pitch", "roll"];
@@ -527,6 +560,12 @@ function _pbApplyConfigObject(cfg) {
       pitchSplit: { ..._headAssistDefaults.pitchSplit, ...(h.pitchSplit || {}) },
       rollSplit: { ..._headAssistDefaults.rollSplit, ...(h.rollSplit || {}) },
     };
+    if (typeof cfg.assistMode === "string") {
+      _assistModeDefault = (cfg.assistMode === "dls") ? "dls" : "rate";
+    }
+    if (cfg.assistDls && typeof cfg.assistDls === "object") {
+      _assistDlsDefaults = { ..._assistDlsDefaults, ...cfg.assistDls };
+    }
     _applyHeadAssistDefaultsToUi();
   } else if (cfg.ikMode && typeof cfg.ikMode === "object") {
     _headAssistDefaults = {
@@ -761,6 +800,12 @@ const HA_TUNE_MAP = {
   "ha-gain-gomito": "tv-ha-gain-gomito",
   "ha-assist-alpha":"tv-ha-assist-alpha",
   "ha-max-step":    "tv-ha-max-step",
+  "hdls-gain-m":       "tv-hdls-gain-m",
+  "hdls-null-gain":    "tv-hdls-null-gain",
+  "hdls-lambda-max":   "tv-hdls-lambda-max",
+  "hdls-manip-thresh": "tv-hdls-manip-thresh",
+  "hdls-max-dq":       "tv-hdls-max-dq",
+  "hdls-max-dx":       "tv-hdls-max-dx",
 };
 
 function _applyTuneDefaultsToUi() {
@@ -893,6 +938,8 @@ document.getElementById("btn-reset-params")?.addEventListener("click", () => {
 
 document.getElementById("btn-reset-head-assist")?.addEventListener("click", () => {
   _headAssistDefaults = JSON.parse(JSON.stringify(_headAssistFactoryDefaults));
+  _assistModeDefault = _assistModeFactory;
+  _assistDlsDefaults = JSON.parse(JSON.stringify(_assistDlsFactory));
   _applyHeadAssistDefaultsToUi();
   setStatus("head-assist-status", "Default HEAD ASSIST ripristinati (non ancora salvati)");
   setGlobalStatus("Default HEAD ASSIST ripristinati. Salva configurazione per persistere sul Raspberry.", "");

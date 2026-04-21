@@ -57,6 +57,10 @@ from controller.web_services.head_assist import (
     parse_head_assist_cfg,
     step_mode5_head_assist,
 )
+from controller.web_services.head_assist_dls import (
+    parse_assist_dls_cfg,
+    step_dls_head_assist,
+)
 from controller.web_services import runtime_config_paths as rcfg
 from controller.web_services.vr_config_defaults import merge_vr_config_with_defaults
 from controller.web_services.ws_core import (
@@ -186,15 +190,17 @@ def _process_head_assist_mode(intent: dict) -> bool:
 
     now = float(intent.get("timestamp", time.monotonic()))
     grip = int(intent.get("grip", 0)) == 1
+    head_quat = None
     head_rpy = None
     try:
-        head_rpy = _quat_to_rpy_deg(
-            float(intent.get("quat_w", 1.0)),
-            float(intent.get("quat_x", 0.0)),
-            float(intent.get("quat_y", 0.0)),
-            float(intent.get("quat_z", 0.0)),
-        )
+        qw = float(intent.get("quat_w", 1.0))
+        qx = float(intent.get("quat_x", 0.0))
+        qy = float(intent.get("quat_y", 0.0))
+        qz = float(intent.get("quat_z", 0.0))
+        head_quat = (qw, qx, qy, qz)
+        head_rpy = _quat_to_rpy_deg(qw, qx, qy, qz)
     except Exception:
+        head_quat = None
         head_rpy = None
 
     servo_physical = _extract_servo_physical_deg_from_telemetry()
@@ -202,15 +208,29 @@ def _process_head_assist_mode(intent: dict) -> bool:
         [float(x) for x in servo_physical] if servo_physical else None
     )
 
-    arm, g_active, hold, tid = step_mode5_head_assist(
-        raw_grip_active=grip,
-        physical_six=phys_list,
-        head_rpy_deg=head_rpy,
-        limits_src=cfg.get("limits") or {},
-        ha=ha,
-        state=st,
-        now=now,
-    )
+    assist_mode_flag = str(cfg.get("assistMode", "rate")).strip().lower()
+    if assist_mode_flag == "dls":
+        ha_dls = parse_assist_dls_cfg(cfg.get("assistDls") or {})
+        arm, g_active, hold, tid = step_dls_head_assist(
+            raw_grip_active=grip,
+            physical_six=phys_list,
+            head_quat_wxyz=head_quat,
+            limits_src=cfg.get("limits") or {},
+            ha=ha,
+            ha_dls=ha_dls,
+            state=st,
+            now=now,
+        )
+    else:
+        arm, g_active, hold, tid = step_mode5_head_assist(
+            raw_grip_active=grip,
+            physical_six=phys_list,
+            head_rpy_deg=head_rpy,
+            limits_src=cfg.get("limits") or {},
+            ha=ha,
+            state=st,
+            now=now,
+        )
 
     if grip and phys_list is None:
         logger.warning("[HEAD-ASSIST] grip attivo ma telemetria servo assente")
